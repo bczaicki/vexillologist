@@ -52,11 +52,11 @@ func loadEnvs(client ld.API, project string) tea.Cmd {
 	}
 }
 
-func loadFlags(client ld.API, project, env string) tea.Cmd {
+func loadFlags(client ld.API, project, env string, archived bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := withTimeout()
 		defer cancel()
-		flags, err := client.ListFlags(ctx, project, ld.ListFlagsOptions{EnvKeys: []string{env}})
+		flags, err := client.ListFlags(ctx, project, ld.ListFlagsOptions{EnvKeys: []string{env}, Archived: archived})
 		if err != nil {
 			return errMsg{err}
 		}

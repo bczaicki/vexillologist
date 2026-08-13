@@ -16,11 +16,12 @@ import (
 
 // fakeAPI is an in-memory ld.API recording mutation calls.
 type fakeAPI struct {
-	mu       sync.Mutex
-	envs     []ld.Environment
-	flags    []ld.FeatureFlag
-	toggles  []string // "key:env:on"
-	archives []string
+	mu            sync.Mutex
+	envs          []ld.Environment
+	flags         []ld.FeatureFlag
+	archivedFlags []ld.FeatureFlag
+	toggles       []string // "key:env:on"
+	archives      []string
 }
 
 func (f *fakeAPI) ListProjects(ctx context.Context) ([]ld.Project, error) {
@@ -32,6 +33,9 @@ func (f *fakeAPI) ListEnvironments(ctx context.Context, projectKey string) ([]ld
 }
 
 func (f *fakeAPI) ListFlags(ctx context.Context, projectKey string, opts ld.ListFlagsOptions) ([]ld.FeatureFlag, error) {
+	if opts.Archived {
+		return f.archivedFlags, nil
+	}
 	return f.flags, nil
 }
 
@@ -183,6 +187,48 @@ func TestArchiveRequiresTypedFlagKey(t *testing.T) {
 	if len(fake.archives) != 1 {
 		t.Errorf("archives = %v", fake.archives)
 	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+func TestEnterFocusesDetailEscReturnsToList(t *testing.T) {
+	tm := startApp(t, newFake(), "staging")
+	waitForOutput(t, tm, "connect1-rollout-geofencing")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitForOutput(t, tm, "esc back to list")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEsc})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	m, ok := tm.FinalModel(t).(Model)
+	if !ok {
+		t.Fatal("final model is not tui.Model")
+	}
+	if m.flags.detailFocused() {
+		t.Error("detail pane still focused after esc")
+	}
+}
+
+func TestArchivedViewShowsBadge(t *testing.T) {
+	fake := newFake()
+	fake.archivedFlags = []ld.FeatureFlag{{
+		Key:      "old-legacy-flag",
+		Name:     "Old Legacy Flag",
+		Kind:     "boolean",
+		Archived: true,
+		Environments: map[string]ld.FlagEnvConfig{
+			"staging": {On: false},
+		},
+	}}
+	tm := startApp(t, fake, "staging")
+	waitForOutput(t, tm, "connect1-rollout-geofencing")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("A")})
+	// The row and its badge land in the same frame; wait for the badge.
+	waitForOutput(t, tm, "⚑ archived")
+
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }

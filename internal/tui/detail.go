@@ -15,7 +15,11 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 	var b strings.Builder
 	wrap := lipgloss.NewStyle().Width(max(20, width))
 
-	b.WriteString(styleTitle.Render(f.Key) + "\n")
+	b.WriteString(styleTitle.Render(f.Key))
+	if f.Archived {
+		b.WriteString("  " + styleWarn.Render("⚑ ARCHIVED"))
+	}
+	b.WriteString("\n")
 	b.WriteString(styleDim.Render("camelCase: "+kebabToCamel(f.Key)) + "\n\n")
 
 	if f.Name != "" && f.Name != f.Key {
@@ -26,7 +30,7 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 	}
 	b.WriteString("\n")
 
-	fmt.Fprintf(&b, "kind: %s   temporary: %v   archived: %v\n", f.Kind, f.Temporary, f.Archived)
+	fmt.Fprintf(&b, "kind: %s   temporary: %v\n", f.Kind, f.Temporary)
 	if len(f.Tags) > 0 {
 		fmt.Fprintf(&b, "tags: %s\n", strings.Join(f.Tags, ", "))
 	}

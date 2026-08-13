@@ -41,10 +41,12 @@ If no project/environment is configured you'll get a picker; otherwise you land 
 | --- | --- |
 | `↑/↓` `j/k` | navigate |
 | `/` | fuzzy filter |
-| `enter` | load full targeting detail |
+| `enter` | open the detail pane (loads full targeting; `↑/↓` scrolls it) |
+| `esc` | leave the detail pane / clear the filter |
 | `t` | toggle flag on/off in the current environment |
 | `n` | create a new flag |
 | `a` | archive flag (all environments) |
+| `A` | switch between active and archived flags (archived rows are marked `⚑ archived`) |
 | `E` / `P` | switch environment / project |
 | `r` | refresh |
 | `q` | quit |

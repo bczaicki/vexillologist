@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,7 +23,11 @@ func (i flagItem) Title() string {
 	if envCfg, ok := i.flag.Environments[i.env]; ok && envCfg.On {
 		dot = styleOnDot.Render("●")
 	}
-	return dot + " " + i.flag.Key
+	title := dot + " " + i.flag.Key
+	if i.flag.Archived {
+		title += " " + styleWarn.Render("⚑ archived")
+	}
+	return title
 }
 
 func (i flagItem) Description() string {
@@ -42,7 +47,10 @@ type flagList struct {
 	detail viewport.Model
 	// full is the last full-representation flag fetched with enter; the
 	// detail pane falls back to the summary of the selected row.
-	full          *ld.FeatureFlag
+	full *ld.FeatureFlag
+	// detailFocus routes navigation keys to the detail viewport instead of
+	// the list (enter to focus, esc to return).
+	detailFocus   bool
 	width, height int
 }
 
@@ -58,13 +66,18 @@ func newFlagList() flagList {
 	return flagList{list: l, detail: viewport.New(0, 0)}
 }
 
-func (f *flagList) setFlags(flags []ld.FeatureFlag, env string) {
+func (f *flagList) setFlags(flags []ld.FeatureFlag, env string, archivedView bool) {
 	items := make([]list.Item, len(flags))
 	for i, flag := range flags {
 		items[i] = flagItem{flag: flag, env: env}
 	}
+	f.list.Title = "flags"
+	if archivedView {
+		f.list.Title = "archived flags"
+	}
 	f.list.SetItems(items)
 	f.full = nil
+	f.detailFocus = false
 	f.refreshDetail(env)
 }
 
@@ -116,6 +129,10 @@ func (f *flagList) filtering() bool {
 	return f.list.FilterState() == list.Filtering
 }
 
+func (f *flagList) focusDetail()        { f.detailFocus = true }
+func (f *flagList) focusList()          { f.detailFocus = false }
+func (f *flagList) detailFocused() bool { return f.detailFocus }
+
 func (f *flagList) setSize(w, h int) {
 	f.width, f.height = w, h
 	h-- // reserve a line for the key-binding help footer
@@ -143,21 +160,28 @@ func (f *flagList) refreshDetail(env string) {
 }
 
 func (f *flagList) update(msg tea.Msg, env string) tea.Cmd {
-	var cmds []tea.Cmd
-	before := f.selected()
+	// Keys go to whichever pane holds focus; everything else goes to both.
+	if _, isKey := msg.(tea.KeyMsg); isKey {
+		var cmd tea.Cmd
+		if f.detailFocus {
+			f.detail, cmd = f.detail.Update(msg)
+			return cmd
+		}
+		before := f.selected()
+		f.list, cmd = f.list.Update(msg)
+		if keyOf(before) != keyOf(f.selected()) {
+			f.full = nil
+			f.refreshDetail(env)
+		}
+		return cmd
+	}
 
+	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	f.list, cmd = f.list.Update(msg)
 	cmds = append(cmds, cmd)
-
 	f.detail, cmd = f.detail.Update(msg)
 	cmds = append(cmds, cmd)
-
-	after := f.selected()
-	if keyOf(before) != keyOf(after) {
-		f.full = nil
-		f.refreshDetail(env)
-	}
 	return tea.Batch(cmds...)
 }
 
@@ -169,17 +193,23 @@ func keyOf(f *ld.FeatureFlag) string {
 }
 
 func (f *flagList) view() string {
+	detailStyle := styleDetail
+	bindings := keys.shortHelp()
+	if f.detailFocus {
+		detailStyle = styleDetailFocused
+		bindings = keys.detailHelp()
+	}
 	columns := lipgloss.JoinHorizontal(lipgloss.Top,
 		f.list.View(),
-		styleDetail.Render(f.detail.View()),
+		detailStyle.Render(f.detail.View()),
 	)
-	return columns + "\n" + styleHelpLine.Render(helpFooter())
+	return columns + "\n" + styleHelpLine.Render(helpFooter(bindings))
 }
 
-// helpFooter renders the flag-list key hints, e.g. "t toggle on/off · n new flag · …".
-func helpFooter() string {
+// helpFooter renders key hints, e.g. "t toggle on/off · n new flag · …".
+func helpFooter(bindings []key.Binding) string {
 	var parts []string
-	for _, binding := range keys.shortHelp() {
+	for _, binding := range bindings {
 		h := binding.Help()
 		parts = append(parts, h.Key+" "+h.Desc)
 	}

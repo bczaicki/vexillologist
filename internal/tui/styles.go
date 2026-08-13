@@ -24,6 +24,8 @@ var (
 	styleTitle    = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleBar      = lipgloss.NewStyle().Foreground(colorBarFg).Background(colorBarBg).Padding(0, 1)
 	styleDetail   = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorDim).Padding(0, 1)
+	// styleDetailFocused marks the detail pane as the active key target.
+	styleDetailFocused = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
 	styleModal    = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorModalBrd).Padding(1, 2)
 	styleHelpLine = lipgloss.NewStyle().Foreground(colorDim)
 )

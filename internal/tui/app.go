@@ -37,6 +37,9 @@ type Model struct {
 	flags   flagList
 	form    createForm
 	confirm *confirmModal
+	// showArchived flips the flag list to LaunchDarkly's archived flags
+	// (the API returns active or archived, never both).
+	showArchived bool
 
 	spinner spinner.Model
 	loading bool
@@ -83,7 +86,7 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, loadEnvs(m.client, m.project))
 	case screenFlagList:
 		// envs are needed for the guarded check on toggles.
-		cmds = append(cmds, loadEnvs(m.client, m.project), loadFlags(m.client, m.project, m.env))
+		cmds = append(cmds, loadEnvs(m.client, m.project), loadFlags(m.client, m.project, m.env, m.showArchived))
 	}
 	return tea.Batch(cmds...)
 }
@@ -125,8 +128,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case flagsLoadedMsg:
 		m.loading = false
-		m.flags.setFlags(msg, m.env)
-		m.status = fmt.Sprintf("%d flags", len(msg))
+		m.flags.setFlags(msg, m.env, m.showArchived)
+		label := "flags"
+		if m.showArchived {
+			label = "archived flags"
+		}
+		m.status = fmt.Sprintf("%d %s", len(msg), label)
 		return m, nil
 
 	case flagDetailMsg:
@@ -146,7 +153,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("✓ created %s", (*ld.FeatureFlag)(msg).Key)
 		// Reload so the new flag appears with proper env state.
 		m.loading = true
-		return m, loadFlags(m.client, m.project, m.env)
+		return m, loadFlags(m.client, m.project, m.env, m.showArchived)
 
 	case flagArchivedMsg:
 		m.loading = false
@@ -221,7 +228,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.env = selected
 				m.screen = screenFlagList
 				m.loading = true
-				return m, tea.Batch(loadFlags(m.client, m.project, m.env), m.spinner.Tick)
+				return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
 			}
 			return m, nil
 		}
@@ -236,11 +243,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenFlagList:
 		switch {
 		case key.Matches(msg, keys.Detail):
+			if m.flags.detailFocused() {
+				return m, nil
+			}
 			if flag := m.flags.selected(); flag != nil {
+				m.flags.focusDetail()
 				m.loading = true
 				return m, tea.Batch(loadFlagDetail(m.client, m.project, flag.Key, m.env), m.spinner.Tick)
 			}
 			return m, nil
+
+		case key.Matches(msg, keys.Back):
+			if m.flags.detailFocused() {
+				m.flags.focusList()
+				return m, nil
+			}
+			// esc otherwise belongs to the list (clears an active filter).
+			return m, m.routeToScreen(msg)
 
 		case key.Matches(msg, keys.Toggle):
 			return m.startToggle()
@@ -255,7 +274,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Refresh):
 			m.loading = true
-			return m, tea.Batch(loadFlags(m.client, m.project, m.env), m.spinner.Tick)
+			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
+
+		case key.Matches(msg, keys.ShowArchived):
+			m.showArchived = !m.showArchived
+			m.loading = true
+			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
 
 		case key.Matches(msg, keys.Env):
 			m.screen = screenEnvPicker
@@ -282,6 +306,10 @@ func (m Model) startToggle() (tea.Model, tea.Cmd) {
 	if flag == nil {
 		return m, nil
 	}
+	if flag.Archived {
+		m.err = errors.New(flag.Key + " is archived and cannot be toggled")
+		return m, nil
+	}
 	envCfg, ok := flag.Environments[m.env]
 	if !ok {
 		m.err = errors.New("no environment data for " + m.env)
@@ -301,6 +329,10 @@ func (m Model) startToggle() (tea.Model, tea.Cmd) {
 func (m Model) startArchive() (tea.Model, tea.Cmd) {
 	flag := m.flags.selected()
 	if flag == nil {
+		return m, nil
+	}
+	if flag.Archived {
+		m.err = errors.New(flag.Key + " is already archived")
 		return m, nil
 	}
 	prompt := fmt.Sprintf("Archive %s? This affects ALL environments.", flag.Key)
