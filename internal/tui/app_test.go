@@ -10,8 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/phillips-connect/vexillologist/internal/cli"
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/cli"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 // fakeAPI is an in-memory ld.API recording mutation calls.
@@ -20,8 +20,10 @@ type fakeAPI struct {
 	envs          []ld.Environment
 	flags         []ld.FeatureFlag
 	archivedFlags []ld.FeatureFlag
+	statuses      map[string]ld.FlagStatus
 	toggles       []string // "key:env:on"
 	archives      []string
+	restores      []string
 }
 
 func (f *fakeAPI) ListProjects(ctx context.Context) ([]ld.Project, error) {
@@ -72,6 +74,17 @@ func (f *fakeAPI) ArchiveFlag(ctx context.Context, projectKey, flagKey, comment 
 	f.archives = append(f.archives, flagKey)
 	f.mu.Unlock()
 	return &ld.FeatureFlag{Key: flagKey, Archived: true}, nil
+}
+
+func (f *fakeAPI) RestoreFlag(ctx context.Context, projectKey, flagKey, comment string) (*ld.FeatureFlag, error) {
+	f.mu.Lock()
+	f.restores = append(f.restores, flagKey)
+	f.mu.Unlock()
+	return &ld.FeatureFlag{Key: flagKey, Archived: false}, nil
+}
+
+func (f *fakeAPI) GetFlagStatuses(ctx context.Context, projectKey, envKey string) (map[string]ld.FlagStatus, error) {
+	return f.statuses, nil
 }
 
 func newFake() *fakeAPI {
@@ -229,6 +242,93 @@ func TestArchivedViewShowsBadge(t *testing.T) {
 	// The row and its badge land in the same frame; wait for the badge.
 	waitForOutput(t, tm, "⚑ archived")
 
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+func TestSortCycleReordersList(t *testing.T) {
+	fake := newFake()
+	// Two extra flags so sort order is observable: zzz created most recently.
+	fake.flags = append(fake.flags,
+		ld.FeatureFlag{Key: "aaa-flag", Name: "AAA", CreationDate: 100,
+			Environments: map[string]ld.FlagEnvConfig{"staging": {On: false}}},
+		ld.FeatureFlag{Key: "zzz-flag", Name: "ZZZ", CreationDate: 999,
+			Environments: map[string]ld.FlagEnvConfig{"staging": {On: false}}},
+	)
+	tm := startApp(t, fake, "staging")
+	waitForOutput(t, tm, "connect1-rollout-geofencing")
+
+	// key → name → created: after two presses zzz-flag (newest) sorts first.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	waitForOutput(t, tm, "sort: name")
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	waitForOutput(t, tm, "sort: created")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+
+	m, ok := tm.FinalModel(t).(Model)
+	if !ok {
+		t.Fatal("final model is not tui.Model")
+	}
+	if m.rawFlags[0].Key != "zzz-flag" {
+		t.Errorf("first flag after created-sort = %s, want zzz-flag", m.rawFlags[0].Key)
+	}
+}
+
+func TestStatusAnnotationRenders(t *testing.T) {
+	fake := newFake()
+	fake.statuses = map[string]ld.FlagStatus{
+		"connect1-rollout-geofencing": {Name: "launched"},
+	}
+	tm := startApp(t, fake, "staging")
+	waitForOutput(t, tm, "launched")
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+func TestRestoreArchivedFlag(t *testing.T) {
+	fake := newFake()
+	fake.archivedFlags = []ld.FeatureFlag{{
+		Key:      "old-legacy-flag",
+		Name:     "Old Legacy Flag",
+		Archived: true,
+		Environments: map[string]ld.FlagEnvConfig{
+			"staging": {On: false},
+		},
+	}}
+	tm := startApp(t, fake, "staging")
+	waitForOutput(t, tm, "connect1-rollout-geofencing")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("A")})
+	waitForOutput(t, tm, "old-legacy-flag")
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	waitForOutput(t, tm, "Restore archived flag old-legacy-flag?")
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	waitForOutput(t, tm, "restored old-legacy-flag")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.restores) != 1 || fake.restores[0] != "old-legacy-flag" {
+		t.Errorf("restores = %v", fake.restores)
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+func TestRestoreOnActiveFlagErrors(t *testing.T) {
+	fake := newFake()
+	tm := startApp(t, fake, "staging")
+	waitForOutput(t, tm, "connect1-rollout-geofencing")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	waitForOutput(t, tm, "is not archived")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.restores) != 0 {
+		t.Errorf("restores = %v, want none", fake.restores)
+	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }

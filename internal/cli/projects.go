@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/phillips-connect/vexillologist/internal/output"
+	"github.com/bczaicki/vexillologist/internal/output"
 )
 
 func newProjectsCmd(g *globals) *cobra.Command {

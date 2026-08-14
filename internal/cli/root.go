@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/phillips-connect/vexillologist/internal/config"
-	"github.com/phillips-connect/vexillologist/internal/ld"
-	"github.com/phillips-connect/vexillologist/internal/output"
+	"github.com/bczaicki/vexillologist/internal/config"
+	"github.com/bczaicki/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/output"
 )
 
 // Exit codes, stable for agents to branch on.

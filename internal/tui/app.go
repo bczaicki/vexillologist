@@ -10,8 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/phillips-connect/vexillologist/internal/cli"
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/cli"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 type screen int
@@ -40,6 +40,11 @@ type Model struct {
 	// showArchived flips the flag list to LaunchDarkly's archived flags
 	// (the API returns active or archived, never both).
 	showArchived bool
+	// rawFlags is the last fetched flag set; re-sorted in place when the
+	// sort mode cycles.
+	rawFlags []ld.FeatureFlag
+	statuses map[string]ld.FlagStatus
+	sortMode ld.SortMode
 
 	spinner spinner.Model
 	loading bool
@@ -53,13 +58,14 @@ type Model struct {
 func New(client ld.API, opts cli.TUIOptions) Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	m := Model{
-		client:  client,
-		project: opts.Project,
-		env:     opts.Environment,
-		guarded: opts.Guarded,
-		flags:   newFlagList(),
-		spinner: sp,
-		loading: true,
+		client:   client,
+		project:  opts.Project,
+		env:      opts.Environment,
+		guarded:  opts.Guarded,
+		flags:    newFlagList(),
+		spinner:  sp,
+		loading:  true,
+		sortMode: ld.SortKey,
 	}
 	switch {
 	case m.project == "":
@@ -86,7 +92,9 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, loadEnvs(m.client, m.project))
 	case screenFlagList:
 		// envs are needed for the guarded check on toggles.
-		cmds = append(cmds, loadEnvs(m.client, m.project), loadFlags(m.client, m.project, m.env, m.showArchived))
+		cmds = append(cmds, loadEnvs(m.client, m.project),
+			loadFlags(m.client, m.project, m.env, m.showArchived),
+			loadStatuses(m.client, m.project, m.env))
 	}
 	return tea.Batch(cmds...)
 }
@@ -128,12 +136,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case flagsLoadedMsg:
 		m.loading = false
-		m.flags.setFlags(msg, m.env, m.showArchived)
+		m.rawFlags = msg
+		ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
+		m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
 		label := "flags"
 		if m.showArchived {
 			label = "archived flags"
 		}
-		m.status = fmt.Sprintf("%d %s", len(msg), label)
+		m.status = fmt.Sprintf("%d %s · sort: %s", len(msg), label, m.sortMode)
+		return m, nil
+
+	case statusesLoadedMsg:
+		m.statuses = msg
+		if m.sortMode == ld.SortStatus {
+			ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
+			m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
+		}
+		m.flags.setStatuses(msg, m.env)
 		return m, nil
 
 	case flagDetailMsg:
@@ -159,6 +178,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.flags.removeFlag(msg.key, m.env)
 		m.status = fmt.Sprintf("✓ archived %s", msg.key)
+		return m, nil
+
+	case flagRestoredMsg:
+		m.loading = false
+		if m.showArchived {
+			m.flags.removeFlag(msg.key, m.env)
+		}
+		m.status = fmt.Sprintf("✓ restored %s", msg.key)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -227,8 +254,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if selected := m.picker.selected(); selected != "" {
 				m.env = selected
 				m.screen = screenFlagList
+				m.statuses = nil
 				m.loading = true
-				return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
+				return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived),
+					loadStatuses(m.client, m.project, m.env), m.spinner.Tick)
 			}
 			return m, nil
 		}
@@ -267,6 +296,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Archive):
 			return m.startArchive()
 
+		case key.Matches(msg, keys.Restore):
+			return m.startRestore()
+
+		case key.Matches(msg, keys.Sort):
+			m.sortMode = nextSortMode(m.sortMode)
+			ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
+			m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
+			m.status = "sort: " + string(m.sortMode) + " — " + sortModeHint(m.sortMode)
+			return m, nil
+
 		case key.Matches(msg, keys.New):
 			m.form = newCreateForm()
 			m.screen = screenCreateForm
@@ -274,7 +313,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Refresh):
 			m.loading = true
-			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
+			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived),
+				loadStatuses(m.client, m.project, m.env), m.spinner.Tick)
 
 		case key.Matches(msg, keys.ShowArchived):
 			m.showArchived = !m.showArchived
@@ -323,6 +363,49 @@ func (m Model) startToggle() (tea.Model, tea.Cmd) {
 	}
 	m.confirm = newConfirmModal(prompt, expected, toggleFlag(m.client, m.project, flag.Key, m.env, turnOn))
 	return m, nil
+}
+
+// startRestore opens a confirm modal to restore the selected archived flag.
+func (m Model) startRestore() (tea.Model, tea.Cmd) {
+	flag := m.flags.selected()
+	if flag == nil {
+		return m, nil
+	}
+	if !flag.Archived {
+		m.err = errors.New(flag.Key + " is not archived")
+		return m, nil
+	}
+	prompt := fmt.Sprintf("Restore archived flag %s?", flag.Key)
+	m.confirm = newConfirmModal(prompt, "", restoreFlag(m.client, m.project, flag.Key))
+	return m, nil
+}
+
+// nextSortMode cycles through ld.SortModes.
+func nextSortMode(mode ld.SortMode) ld.SortMode {
+	for i, candidate := range ld.SortModes {
+		if candidate == mode {
+			return ld.SortModes[(i+1)%len(ld.SortModes)]
+		}
+	}
+	return ld.SortKey
+}
+
+// sortModeHint is the one-line explanation shown when cycling sorts.
+func sortModeHint(mode ld.SortMode) string {
+	switch mode {
+	case ld.SortName:
+		return "flag name A→Z"
+	case ld.SortCreated:
+		return "newest created first"
+	case ld.SortLongestOn:
+		return "on-flags first, longest unchanged first"
+	case ld.SortRecent:
+		return "most recently changed first"
+	case ld.SortStatus:
+		return "archive candidates (inactive, launched) first"
+	default:
+		return "flag key A→Z"
+	}
 }
 
 // startArchive opens the strong confirm modal for archiving the selected flag.

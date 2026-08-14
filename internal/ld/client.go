@@ -37,6 +37,8 @@ type API interface {
 	CreateFlag(ctx context.Context, projectKey string, params CreateFlagParams) (*FeatureFlag, error)
 	ToggleFlag(ctx context.Context, projectKey, flagKey, envKey string, on bool, comment string) (*FeatureFlag, error)
 	ArchiveFlag(ctx context.Context, projectKey, flagKey, comment string) (*FeatureFlag, error)
+	RestoreFlag(ctx context.Context, projectKey, flagKey, comment string) (*FeatureFlag, error)
+	GetFlagStatuses(ctx context.Context, projectKey, envKey string) (map[string]FlagStatus, error)
 }
 
 // Client is a minimal LaunchDarkly REST API client covering the endpoints

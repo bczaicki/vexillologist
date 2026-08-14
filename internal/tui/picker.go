@@ -4,7 +4,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 // pickerItem is one selectable row in the project or environment picker.

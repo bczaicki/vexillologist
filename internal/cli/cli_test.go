@@ -222,6 +222,112 @@ func TestNotFoundExitCode(t *testing.T) {
 	}
 }
 
+func TestFlagsListRejectsBogusSort(t *testing.T) {
+	_, err := runVex(t, "flags", "list", "-p", "horizon", "-e", "staging",
+		"--api-token", "tok", "--sort", "bogus")
+	if err == nil || exitCodeFor(err) != ExitUsage {
+		t.Errorf("err = %v, want usage error", err)
+	}
+}
+
+func TestFlagsListSortLongestOn(t *testing.T) {
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "flag-statuses") {
+			fmt.Fprint(w, `{"items": []}`)
+			return
+		}
+		fmt.Fprint(w, `{"items": [
+			{"key": "recently-toggled", "name": "Recent", "environments": {"staging": {"on": true, "lastModified": 1770000000000}}},
+			{"key": "ancient-on", "name": "Ancient", "environments": {"staging": {"on": true, "lastModified": 1600000000000}}},
+			{"key": "off-flag", "name": "Off", "environments": {"staging": {"on": false, "lastModified": 1500000000000}}}
+		], "totalCount": 3}`)
+	})
+
+	out, err := runVex(t, "flags", "list", "-p", "horizon", "-e", "staging", "--json",
+		"--api-token", "tok", "--base-url", srv.URL, "--sort", "longest-on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flags []map[string]any
+	if err := json.Unmarshal([]byte(out), &flags); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	got := []string{flags[0]["key"].(string), flags[1]["key"].(string), flags[2]["key"].(string)}
+	want := []string{"ancient-on", "recently-toggled", "off-flag"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestFlagsStatusesJSON(t *testing.T) {
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "flag-statuses") {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"items": [
+			{"name": "inactive", "lastRequested": "2026-06-01T00:00:00Z",
+			 "_links": {"parent": {"href": "/api/v2/flags/horizon/dead-flag"}}}
+		]}`)
+	})
+
+	out, err := runVex(t, "flags", "statuses", "-p", "horizon", "-e", "staging", "--json",
+		"--api-token", "tok", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statuses map[string]map[string]any
+	if err := json.Unmarshal([]byte(out), &statuses); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if statuses["dead-flag"]["name"] != "inactive" {
+		t.Errorf("statuses = %v", statuses)
+	}
+}
+
+func TestRestoreWithYes(t *testing.T) {
+	var patchBody string
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r.Body)
+			patchBody = buf.String()
+			fmt.Fprint(w, `{"key": "old-flag", "archived": false}`)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	})
+
+	out, err := runVex(t, "flags", "restore", "old-flag", "--yes", "--json",
+		"-p", "horizon", "--api-token", "tok", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(patchBody, `"restoreFlag"`) {
+		t.Errorf("patch = %s", patchBody)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["ok"] != true || result["action"] != "restoreFlag" {
+		t.Errorf("result = %v", result)
+	}
+}
+
+func TestRestoreWithoutTTYRequiresYes(t *testing.T) {
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	})
+
+	_, err := runVex(t, "flags", "restore", "old-flag",
+		"-p", "horizon", "--api-token", "tok", "--base-url", srv.URL)
+	if err == nil || exitCodeFor(err) != ExitConfirmation {
+		t.Errorf("err = %v, want confirmation error", err)
+	}
+}
+
 func TestCreateFlagJSON(t *testing.T) {
 	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

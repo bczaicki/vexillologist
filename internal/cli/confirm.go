@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 // guardedEnvKeys always require strong confirmation regardless of LD's

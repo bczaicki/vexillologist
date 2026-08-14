@@ -3,12 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
-	"github.com/phillips-connect/vexillologist/internal/output"
+	"github.com/bczaicki/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/output"
 )
 
 func newFlagsCmd(g *globals) *cobra.Command {
@@ -22,17 +23,23 @@ func newFlagsCmd(g *globals) *cobra.Command {
 		newFlagsToggleCmd(g),
 		newFlagsCreateCmd(g),
 		newFlagsArchiveCmd(g),
+		newFlagsRestoreCmd(g),
+		newFlagsStatusesCmd(g),
 	)
 	return cmd
 }
 
 func newFlagsListCmd(g *globals) *cobra.Command {
-	var filter string
+	var filter, sortBy string
 	var archived bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List flags in a project, with per-environment on/off state",
+		Short: "List flags in a project, with per-environment state, status, and age",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			sortMode, err := ld.ParseSortMode(sortBy)
+			if err != nil {
+				return usageErrorf("%v", err)
+			}
 			project, err := g.requireProject()
 			if err != nil {
 				return err
@@ -53,27 +60,90 @@ func newFlagsListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Statuses power the STATUS column and status sorting; their
+			// absence shouldn't break a plain listing.
+			statuses, statusErr := client.GetFlagStatuses(cmd.Context(), project, env)
+			if statusErr != nil && sortMode == ld.SortStatus {
+				return statusErr
+			}
+
+			ld.SortFlags(flags, sortMode, env, statuses)
+
 			if g.jsonOut {
 				return output.JSON(cmd.OutOrStdout(), flags)
 			}
 			rows := make([][]string, len(flags))
 			for i, f := range flags {
-				state := "-"
+				state, changed := "-", "-"
 				if envCfg, ok := f.Environments[env]; ok {
-					if envCfg.On {
-						state = "on"
-					} else {
-						state = "off"
-					}
+					state = onOff(envCfg.On)
+					changed = output.RelativeAge(envCfg.LastModified)
 				}
-				rows[i] = []string{f.Key, f.Name, state, strings.Join(f.Tags, ",")}
+				status := "-"
+				if s, ok := statuses[f.Key]; ok {
+					status = s.Name
+				}
+				rows[i] = []string{f.Key, f.Name, state, changed, status, strings.Join(f.Tags, ",")}
 			}
-			return output.Table(cmd.OutOrStdout(), []string{"KEY", "NAME", strings.ToUpper(env), "TAGS"}, rows)
+			header := []string{"KEY", "NAME", strings.ToUpper(env), "CHANGED", "STATUS", "TAGS"}
+			if err := output.Table(cmd.OutOrStdout(), header, rows); err != nil {
+				return err
+			}
+			if statusErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "note: flag statuses unavailable: %v\n", statusErr)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&filter, "filter", "", "substring filter on flag key/name")
 	cmd.Flags().BoolVar(&archived, "archived", false, "list archived flags instead of active ones")
+	cmd.Flags().StringVar(&sortBy, "sort", string(ld.SortKey),
+		"sort order: key, name, created (newest first), longest-on (on-flags, oldest change first), recent, status (archive candidates first)")
 	return cmd
+}
+
+func newFlagsStatusesCmd(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "statuses",
+		Short: "Show every flag's evaluation status in one environment (new/active/launched/inactive)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			project, err := g.requireProject()
+			if err != nil {
+				return err
+			}
+			env, err := g.requireEnv()
+			if err != nil {
+				return err
+			}
+			client, err := g.newClient()
+			if err != nil {
+				return err
+			}
+			statuses, err := client.GetFlagStatuses(cmd.Context(), project, env)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return output.JSON(cmd.OutOrStdout(), statuses)
+			}
+			keys := make([]string, 0, len(statuses))
+			for key := range statuses {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			rows := make([][]string, len(keys))
+			for i, key := range keys {
+				s := statuses[key]
+				lastRequested := "-"
+				if s.LastRequested != nil {
+					lastRequested = output.RelativeAge(s.LastRequested.UnixMilli()) + " ago"
+				}
+				rows[i] = []string{key, s.Name, lastRequested}
+			}
+			return output.Table(cmd.OutOrStdout(), []string{"KEY", "STATUS", "LAST REQUESTED"}, rows)
+		},
+	}
 }
 
 func newFlagsGetCmd(g *globals) *cobra.Command {
@@ -290,6 +360,46 @@ func newFlagsArchiveCmd(g *globals) *cobra.Command {
 				})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "✓ archived flag %s\n", flagKey)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&comment, "comment", "via vex", "audit-log comment for the change")
+	return cmd
+}
+
+func newFlagsRestoreCmd(g *globals) *cobra.Command {
+	var comment string
+	cmd := &cobra.Command{
+		Use:   "restore <flag-key>",
+		Short: "Restore an archived flag",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			project, err := g.requireProject()
+			if err != nil {
+				return err
+			}
+			flagKey := args[0]
+			if g.dryRun {
+				return emitDryRun(cmd, g, "restoreFlag", "", ld.RestoreFlagPatch(comment))
+			}
+			client, err := g.newClient()
+			if err != nil {
+				return err
+			}
+			desc := fmt.Sprintf("Restore archived flag %q in project %q", flagKey, project)
+			if err := g.confirm(desc, "", false); err != nil {
+				return err
+			}
+			flag, err := client.RestoreFlag(cmd.Context(), project, flagKey, comment)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return output.JSON(cmd.OutOrStdout(), output.MutationResult{
+					OK: true, Action: "restoreFlag", Flag: flag,
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ restored flag %s\n", flagKey)
 			return nil
 		},
 	}

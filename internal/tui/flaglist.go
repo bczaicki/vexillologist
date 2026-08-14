@@ -9,13 +9,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/output"
 )
 
 // flagItem is one row in the flag list.
 type flagItem struct {
-	flag ld.FeatureFlag
-	env  string
+	flag   ld.FeatureFlag
+	env    string
+	status string
 }
 
 func (i flagItem) Title() string {
@@ -35,6 +37,16 @@ func (i flagItem) Description() string {
 	if len(i.flag.Tags) > 0 {
 		desc += "  " + styleDim.Render("["+strings.Join(i.flag.Tags, ", ")+"]")
 	}
+	var notes []string
+	if envCfg, ok := i.flag.Environments[i.env]; ok && envCfg.LastModified > 0 {
+		notes = append(notes, "changed "+output.RelativeAge(envCfg.LastModified)+" ago")
+	}
+	if i.status != "" {
+		notes = append(notes, i.status)
+	}
+	if len(notes) > 0 {
+		desc += styleDim.Render(" · " + strings.Join(notes, " · "))
+	}
 	return desc
 }
 
@@ -50,7 +62,11 @@ type flagList struct {
 	full *ld.FeatureFlag
 	// detailFocus routes navigation keys to the detail viewport instead of
 	// the list (enter to focus, esc to return).
-	detailFocus   bool
+	detailFocus bool
+	// statuses are LD evaluation statuses for the current env, keyed by flag
+	// key; may be nil while loading or when unavailable.
+	statuses      map[string]ld.FlagStatus
+	archivedView  bool
 	width, height int
 }
 
@@ -67,9 +83,10 @@ func newFlagList() flagList {
 }
 
 func (f *flagList) setFlags(flags []ld.FeatureFlag, env string, archivedView bool) {
+	f.archivedView = archivedView
 	items := make([]list.Item, len(flags))
 	for i, flag := range flags {
-		items[i] = flagItem{flag: flag, env: env}
+		items[i] = flagItem{flag: flag, env: env, status: f.statusOf(flag.Key)}
 	}
 	f.list.Title = "flags"
 	if archivedView {
@@ -79,6 +96,25 @@ func (f *flagList) setFlags(flags []ld.FeatureFlag, env string, archivedView boo
 	f.full = nil
 	f.detailFocus = false
 	f.refreshDetail(env)
+}
+
+// setStatuses stores LD evaluation statuses and refreshes row annotations.
+func (f *flagList) setStatuses(statuses map[string]ld.FlagStatus, env string) {
+	f.statuses = statuses
+	for i, item := range f.list.Items() {
+		if fi, ok := item.(flagItem); ok {
+			fi.status = f.statusOf(fi.flag.Key)
+			f.list.SetItem(i, fi)
+		}
+	}
+	f.refreshDetail(env)
+}
+
+func (f *flagList) statusOf(key string) string {
+	if s, ok := f.statuses[key]; ok {
+		return s.Name
+	}
+	return ""
 }
 
 // updateFlag replaces one flag in the list (after a toggle) in place.
@@ -156,7 +192,11 @@ func (f *flagList) refreshDetail(env string) {
 		flag = f.full
 		fullyLoaded = true
 	}
-	f.detail.SetContent(renderFlagDetail(flag, env, f.detail.Width, fullyLoaded))
+	var status *ld.FlagStatus
+	if s, ok := f.statuses[selected.Key]; ok {
+		status = &s
+	}
+	f.detail.SetContent(renderFlagDetail(flag, env, f.detail.Width, fullyLoaded, status))
 }
 
 func (f *flagList) update(msg tea.Msg, env string) tea.Cmd {
@@ -195,6 +235,9 @@ func keyOf(f *ld.FeatureFlag) string {
 func (f *flagList) view() string {
 	detailStyle := styleDetail
 	bindings := keys.shortHelp()
+	if f.archivedView {
+		bindings = keys.archivedHelp()
+	}
 	if f.detailFocus {
 		detailStyle = styleDetailFocused
 		bindings = keys.detailHelp()

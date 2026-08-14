@@ -36,3 +36,12 @@ func ArchiveFlagPatch(comment string) SemanticPatch {
 		Instructions: []Instruction{{Kind: "archiveFlag"}},
 	}
 }
+
+// RestoreFlagPatch builds the flag-wide semantic patch that restores an
+// archived flag.
+func RestoreFlagPatch(comment string) SemanticPatch {
+	return SemanticPatch{
+		Comment:      comment,
+		Instructions: []Instruction{{Kind: "restoreFlag"}},
+	}
+}

@@ -1,4 +1,4 @@
-module github.com/phillips-connect/vexillologist
+module github.com/bczaicki/vexillologist
 
 go 1.26.5
 

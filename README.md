@@ -6,11 +6,35 @@ A terminal tool for viewing and managing [LaunchDarkly](https://launchdarkly.com
 
 ## Install
 
+With Go 1.26+ installed (`brew install go`), install straight from GitHub:
+
 ```sh
-make build        # → bin/vex
+go install github.com/bczaicki/vexillologist/cmd/vex@latest
 ```
 
-Requires Go 1.26+.
+That puts `vex` in `$(go env GOPATH)/bin` (usually `~/go/bin`) — make sure it's on your `PATH`:
+
+```sh
+export PATH="$HOME/go/bin:$PATH"   # add to ~/.zshrc
+```
+
+Or build from a clone:
+
+```sh
+git clone https://github.com/bczaicki/vexillologist.git
+cd vexillologist
+make install      # go install with a version stamp
+# or: make build  # → bin/vex, without touching your PATH
+```
+
+### Quick start
+
+```sh
+export LD_API_TOKEN=api-xxxx                     # LaunchDarkly → Account settings → Authorization
+vex projects list                                # verify auth, find your project key
+vex config set project=my-project environment=staging
+vex                                              # launch the TUI
+```
 
 ## Authentication
 
@@ -44,14 +68,18 @@ If no project/environment is configured you'll get a picker; otherwise you land 
 | `enter` | open the detail pane (loads full targeting; `↑/↓` scrolls it) |
 | `esc` | leave the detail pane / clear the filter |
 | `t` | toggle flag on/off in the current environment |
+| `s` | cycle sort: key → name → created → **longest-on** → recent → status |
 | `n` | create a new flag |
 | `a` | archive flag (all environments) |
+| `u` | restore an archived flag |
 | `A` | switch between active and archived flags (archived rows are marked `⚑ archived`) |
 | `E` / `P` | switch environment / project |
 | `r` | refresh |
 | `q` | quit |
 
-The detail pane shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()`.
+Each row shows when the flag last changed in the current environment and its LaunchDarkly **evaluation status** — `new`, `active`, `launched` (serving one variation to everyone — retirement candidate), or `inactive` (no evaluations for 7+ days — archive candidate). The `longest-on` sort puts on-flags first, longest-unchanged first, and the `status` sort floats archive candidates to the top.
+
+The detail pane shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()` — plus its creation age, per-environment change ages, and evaluation status.
 
 **Guardrails**: environments that LaunchDarkly marks critical, are named `prod`/`production`, or are listed under `guarded_environments:` in the config file require typing the environment key to confirm a toggle. Archiving always requires typing the flag key.
 
@@ -64,11 +92,17 @@ vex projects list --json
 vex envs list -p my-project --json
 vex flags list -p my-project -e staging --json
 vex flags list -p my-project -e staging --filter geofence --archived
+vex flags list -p my-project -e staging --sort longest-on     # what's been on the longest
+vex flags list -p my-project -e staging --sort status         # archive candidates first
+vex flags statuses -p my-project -e staging --json            # evaluation status per flag
 vex flags get my-flag-key -p my-project -e staging --json
 vex flags toggle my-flag-key -p my-project -e staging --on --yes --json
 vex flags create new-flag-key -p my-project --name "New Flag" --tags team-a --json
 vex flags archive old-flag-key -p my-project --yes --json
+vex flags restore old-flag-key -p my-project --yes --json
 ```
+
+`--sort` accepts `key`, `name`, `created` (newest first), `longest-on` (on-flags, oldest change first), `recent` (latest change first), and `status` (inactive → launched → new → active). The human table includes `CHANGED` (time since the flag last changed in the environment) and `STATUS` columns; `--json` returns the raw flag resources in the sorted order, and `vex flags statuses` returns the status map for scripting.
 
 ### Confirmations
 

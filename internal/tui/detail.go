@@ -7,11 +7,13 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/output"
 )
 
-// renderFlagDetail renders the right-hand detail pane for one flag.
-func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool) string {
+// renderFlagDetail renders the right-hand detail pane for one flag. status is
+// LD's evaluation status in env (nil when unavailable).
+func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool, status *ld.FlagStatus) string {
 	var b strings.Builder
 	wrap := lipgloss.NewStyle().Width(max(20, width))
 
@@ -31,6 +33,16 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 	b.WriteString("\n")
 
 	fmt.Fprintf(&b, "kind: %s   temporary: %v\n", f.Kind, f.Temporary)
+	if f.CreationDate > 0 {
+		fmt.Fprintf(&b, "created: %s ago\n", output.RelativeAge(f.CreationDate))
+	}
+	if status != nil {
+		line := "status in " + env + ": " + renderStatusName(status.Name)
+		if status.LastRequested != nil {
+			line += styleDim.Render("  (last evaluated " + output.RelativeAge(status.LastRequested.UnixMilli()) + " ago)")
+		}
+		b.WriteString(line + "\n")
+	}
 	if len(f.Tags) > 0 {
 		fmt.Fprintf(&b, "tags: %s\n", strings.Join(f.Tags, ", "))
 	}
@@ -66,7 +78,11 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 			if key == env {
 				marker = styleTitle.Render("▸ ")
 			}
-			fmt.Fprintf(&b, "%s%-16s %s\n", marker, key, state)
+			age := ""
+			if envCfg.LastModified > 0 {
+				age = styleDim.Render("  changed " + output.RelativeAge(envCfg.LastModified) + " ago")
+			}
+			fmt.Fprintf(&b, "%s%-16s %s%s\n", marker, key, state, age)
 			if key == env {
 				b.WriteString(renderTargeting(envCfg, f.Variations))
 			}
@@ -77,6 +93,19 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 		b.WriteString("\n" + styleDim.Render("press enter for targeting details"))
 	}
 	return b.String()
+}
+
+// renderStatusName colors an LD evaluation status by how strongly it
+// suggests cleanup.
+func renderStatusName(name string) string {
+	switch name {
+	case "inactive", "launched":
+		return styleWarn.Render(name)
+	case "active":
+		return styleOnDot.Render(name)
+	default:
+		return name
+	}
 }
 
 // renderTargeting summarizes an environment's targeting config (read-only).

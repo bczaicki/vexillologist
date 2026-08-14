@@ -1,5 +1,7 @@
 package ld
 
+import "time"
+
 // Project is a LaunchDarkly project.
 type Project struct {
 	Key  string   `json:"key"`
@@ -99,6 +101,15 @@ type Member struct {
 	Email     string `json:"email,omitempty"`
 	FirstName string `json:"firstName,omitempty"`
 	LastName  string `json:"lastName,omitempty"`
+}
+
+// FlagStatus is LaunchDarkly's per-environment evaluation status of a flag:
+// "new" (never requested), "active" (receiving requests), "launched"
+// (serving one variation to everyone — retirement candidate), or "inactive"
+// (no requests for 7+ days — archive candidate).
+type FlagStatus struct {
+	Name          string     `json:"name"`
+	LastRequested *time.Time `json:"lastRequested,omitempty"`
 }
 
 // CreateFlagParams is the body for creating a new flag. Variations defaults

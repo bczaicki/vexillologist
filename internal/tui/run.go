@@ -5,8 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/phillips-connect/vexillologist/internal/cli"
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/cli"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 // Run launches the interactive TUI. It satisfies cli.TUIRunner.

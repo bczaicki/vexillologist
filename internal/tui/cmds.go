@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/phillips-connect/vexillologist/internal/ld"
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 const requestTimeout = 30 * time.Second
@@ -22,6 +22,11 @@ type flagToggledMsg struct {
 }
 type flagCreatedMsg *ld.FeatureFlag
 type flagArchivedMsg struct{ key string }
+type flagRestoredMsg struct{ key string }
+
+// statusesLoadedMsg carries flag statuses; nil means they were unavailable
+// (statuses are an enhancement, not worth an error banner).
+type statusesLoadedMsg map[string]ld.FlagStatus
 type errMsg struct{ err error }
 
 func withTimeout() (context.Context, context.CancelFunc) {
@@ -108,5 +113,28 @@ func archiveFlag(client ld.API, project, key string) tea.Cmd {
 			return errMsg{err}
 		}
 		return flagArchivedMsg{key: key}
+	}
+}
+
+func restoreFlag(client ld.API, project, key string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := withTimeout()
+		defer cancel()
+		if _, err := client.RestoreFlag(ctx, project, key, "via vex tui"); err != nil {
+			return errMsg{err}
+		}
+		return flagRestoredMsg{key: key}
+	}
+}
+
+func loadStatuses(client ld.API, project, env string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := withTimeout()
+		defer cancel()
+		statuses, err := client.GetFlagStatuses(ctx, project, env)
+		if err != nil {
+			return statusesLoadedMsg(nil)
+		}
+		return statusesLoadedMsg(statuses)
 	}
 }
