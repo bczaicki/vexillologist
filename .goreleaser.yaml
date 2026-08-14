@@ -28,6 +28,27 @@ archives:
 checksum:
   name_template: checksums.txt
 
+homebrew_casks:
+  - name: vex
+    repository:
+      owner: bczaicki
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/bczaicki/vexillologist
+    description: LaunchDarkly feature-flag TUI and CLI for humans and agents
+    commit_author:
+      name: goreleaser-bot
+      email: bot@goreleaser.com
+    # The binaries are unsigned; strip the quarantine bit so Gatekeeper
+    # doesn't block them.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/vex"]
+          end
+
 changelog:
   sort: asc
   filters:

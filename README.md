@@ -6,6 +6,12 @@ A terminal tool for viewing and managing [LaunchDarkly](https://launchdarkly.com
 
 ## Install
 
+### Homebrew (macOS)
+
+```sh
+brew install bczaicki/tap/vex
+```
+
 ### Prebuilt binary (no Go required)
 
 Grab the archive for your platform from the [releases page](https://github.com/bczaicki/vexillologist/releases), or:
