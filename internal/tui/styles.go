@@ -15,7 +15,10 @@ var (
 )
 
 var (
-	styleOnDot  = lipgloss.NewStyle().Foreground(colorOn)
+	// styleOnDot / styleOffDot are a flag's state: the matrix's dots, and the
+	// on/off words in the detail view. On is bold as well as green so a lit
+	// column still stands out on a washed-out terminal.
+	styleOnDot  = lipgloss.NewStyle().Foreground(colorOn).Bold(true)
 	styleOffDot = lipgloss.NewStyle().Foreground(colorOff)
 	styleError  = lipgloss.NewStyle().Foreground(colorErr)
 	styleStatus = lipgloss.NewStyle().Foreground(colorOn)
@@ -23,9 +26,12 @@ var (
 	styleWarn   = lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
 	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	styleBar    = lipgloss.NewStyle().Foreground(colorBarFg).Background(colorBarBg).Padding(0, 1)
-	styleDetail = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorDim).Padding(0, 1)
-	// styleDetailFocused marks the detail pane as the active key target.
-	styleDetailFocused = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
-	styleModal         = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorModalBrd).Padding(1, 2)
-	styleHelpLine      = lipgloss.NewStyle().Foreground(colorDim)
+	// styleRowKey / styleRowKeySelected are the flag-key column in the state
+	// matrix; the selected row is the only one that takes the accent color.
+	styleRowKey         = lipgloss.NewStyle()
+	styleRowKeySelected = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	// styleDetail frames the detail view that replaces the list on enter.
+	styleDetail   = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
+	styleModal    = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(colorModalBrd).Padding(1, 2)
+	styleHelpLine = lipgloss.NewStyle().Foreground(colorDim)
 )

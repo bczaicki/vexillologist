@@ -90,7 +90,7 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 	}
 
 	if !fullyLoaded {
-		b.WriteString("\n" + styleDim.Render("press enter for targeting details"))
+		b.WriteString("\n" + styleDim.Render("loading targeting details…"))
 	}
 	return b.String()
 }

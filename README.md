@@ -82,25 +82,43 @@ vex               # or: vex tui
 
 If no project/environment is configured you'll get a picker; otherwise you land straight on the flag list.
 
+The flag list is a **state matrix**: one row per flag, one column per environment, so you can see where a flag is on without switching environments.
+
+```
+  flag                          dev   test  staging  producti  status
+  connect-1-asset-tags           ○     ○       ●        ●      active
+  connect-1-branch-filter        ●     ●       ●        ●      launched
+  connect-1-device-commands ⚑    ○     ○      [●]       ●      inactive
+  only-in-dev                    ●     –       –        –      new
+```
+
+`●` on · `○` off · `–` the flag has no config in that environment at all, which is a different fact from off · `⚑` archived.
+
+`←/→` moves the **column cursor** — the bracketed cell. That column *is* the current environment: it's what `t` toggles, what the status bar shows, and what the env-relative sorts and evaluation statuses are computed against. Promoting a flag along dev → test → staging → prod is arrow keys along one row rather than four environment switches, and each column keeps its own guardrail (toggling the `production` column still demands the typed env key).
+
+The detail view is opened on demand with `enter` and replaces the matrix until you `esc` back, so scanning many flags and digging into one stay separate modes — but `t`/`space` toggles from either.
+
 | Key | Action |
 | --- | --- |
-| `↑/↓` `j/k` | navigate |
+| `↑/↓` `j/k` | move between flags |
+| `←/→` `h/l` | move the environment column (sets the current environment) |
 | `/` | fuzzy filter |
-| `enter` | open the detail pane (loads full targeting; `↑/↓` scrolls it) |
-| `esc` | leave the detail pane / clear the filter |
-| `t` | toggle flag on/off in the current environment |
+| `enter` | open the detail view (loads full targeting; `↑/↓` scrolls it) |
+| `esc` | close the detail view / clear the filter |
+| `t` or `space` | toggle flag on/off in the cursor's environment |
 | `s` | cycle sort: key → name → created → **longest-on** → recent → status |
 | `n` | create a new flag |
 | `a` | archive flag (all environments) |
 | `u` | restore an archived flag |
-| `A` | switch between active and archived flags (archived rows are marked `⚑ archived`) |
-| `E` / `P` | switch environment / project |
+| `A` | switch between active and archived flags (archived rows are marked `⚑`) |
+| `E` / `P` | jump the column cursor to an environment / switch project |
 | `r` | refresh |
 | `q` | quit |
+| `pgup/pgdn` | page through a long list |
 
-Each row shows when the flag last changed in the current environment and its LaunchDarkly **evaluation status** — `new`, `active`, `launched` (serving one variation to everyone — retirement candidate), or `inactive` (no evaluations for 7+ days — archive candidate). The `longest-on` sort puts on-flags first, longest-unchanged first, and the `status` sort floats archive candidates to the top.
+The `status` column is the flag's LaunchDarkly **evaluation status** in the cursor's environment — `new`, `active`, `launched` (serving one variation to everyone — retirement candidate), or `inactive` (no evaluations for 7+ days — archive candidate). It's dropped on narrow terminals to keep the matrix readable. The `longest-on` sort puts on-flags first, longest-unchanged first, and the `status` sort floats archive candidates to the top; because both are defined relative to an environment, moving the column cursor re-sorts (keeping your place on the same flag).
 
-The detail pane shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()` — plus its creation age, per-environment change ages, and evaluation status.
+The detail view shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()` — plus its creation age, per-environment change ages, and evaluation status.
 
 **Guardrails**: environments that LaunchDarkly marks critical, are named `prod`/`production`, or are listed under `guarded_environments:` in the config file require typing the environment key to confirm a toggle. Archiving always requires typing the flag key.
 

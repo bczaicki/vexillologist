@@ -44,7 +44,10 @@ type Model struct {
 	// sort mode cycles.
 	rawFlags []ld.FeatureFlag
 	statuses map[string]ld.FlagStatus
-	sortMode ld.SortMode
+	// statusesByEnv caches evaluation statuses per environment. Statuses are a
+	// per-env endpoint, and the column cursor can visit every environment.
+	statusesByEnv map[string]map[string]ld.FlagStatus
+	sortMode      ld.SortMode
 
 	spinner spinner.Model
 	loading bool
@@ -58,14 +61,15 @@ type Model struct {
 func New(client ld.API, opts cli.TUIOptions) Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	m := Model{
-		client:   client,
-		project:  opts.Project,
-		env:      opts.Environment,
-		guarded:  opts.Guarded,
-		flags:    newFlagList(),
-		spinner:  sp,
-		loading:  true,
-		sortMode: ld.SortKey,
+		client:        client,
+		project:       opts.Project,
+		env:           opts.Environment,
+		guarded:       opts.Guarded,
+		flags:         newFlagList(),
+		spinner:       sp,
+		loading:       true,
+		sortMode:      ld.SortKey,
+		statusesByEnv: map[string]map[string]ld.FlagStatus{},
 	}
 	switch {
 	case m.project == "":
@@ -91,9 +95,10 @@ func (m Model) Init() tea.Cmd {
 	case screenEnvPicker:
 		cmds = append(cmds, loadEnvs(m.client, m.project))
 	case screenFlagList:
-		// envs are needed for the guarded check on toggles.
+		// The flag load is deliberately not batched here: it needs every
+		// environment key to request a full matrix row, so it is dispatched
+		// once envsLoadedMsg lands.
 		cmds = append(cmds, loadEnvs(m.client, m.project),
-			loadFlags(m.client, m.project, m.env, m.showArchived),
 			loadStatuses(m.client, m.project, m.env))
 	}
 	return tea.Batch(cmds...)
@@ -128,9 +133,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case envsLoadedMsg:
 		m.envs = msg
+		// The matrix gets one column per environment, in LD's own order.
+		m.flags.setEnvironments(msg, m.env)
 		if m.screen == screenEnvPicker {
 			m.loading = false
 			m.picker.setEnvironments(msg, m.guarded)
+			return m, nil
+		}
+		// The initial flag load waits for the env keys it needs to ask for.
+		if m.rawFlags == nil {
+			return m, loadFlags(m.client, m.project, m.envKeys(), m.showArchived)
 		}
 		return m, nil
 
@@ -147,12 +159,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statusesLoadedMsg:
-		m.statuses = msg
-		if m.sortMode == ld.SortStatus {
-			ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
-			m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
+		m.statusesByEnv[msg.env] = msg.statuses
+		if msg.env != m.env {
+			// A stale response for a column the cursor has since left.
+			return m, nil
 		}
-		m.flags.setStatuses(msg, m.env)
+		m.statuses = msg.statuses
+		if m.sortMode == ld.SortStatus {
+			m.resort()
+		}
+		m.flags.setStatuses(msg.statuses, m.env)
 		return m, nil
 
 	case flagDetailMsg:
@@ -172,7 +188,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("✓ created %s", (*ld.FeatureFlag)(msg).Key)
 		// Reload so the new flag appears with proper env state.
 		m.loading = true
-		return m, loadFlags(m.client, m.project, m.env, m.showArchived)
+		return m, loadFlags(m.client, m.project, m.envKeys(), m.showArchived)
 
 	case flagArchivedMsg:
 		m.loading = false
@@ -255,8 +271,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.env = selected
 				m.screen = screenFlagList
 				m.statuses = nil
+				m.flags.focusEnv(m.env)
 				m.loading = true
-				return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived),
+				return m, tea.Batch(loadFlags(m.client, m.project, m.envKeys(), m.showArchived),
 					loadStatuses(m.client, m.project, m.env), m.spinner.Tick)
 			}
 			return m, nil
@@ -272,19 +289,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenFlagList:
 		switch {
 		case key.Matches(msg, keys.Detail):
-			if m.flags.detailFocused() {
+			if m.flags.detailOpened() {
 				return m, nil
 			}
 			if flag := m.flags.selected(); flag != nil {
-				m.flags.focusDetail()
+				m.flags.openDetail(m.env)
 				m.loading = true
-				return m, tea.Batch(loadFlagDetail(m.client, m.project, flag.Key, m.env), m.spinner.Tick)
+				return m, tea.Batch(loadFlagDetail(m.client, m.project, flag.Key, m.envKeys()), m.spinner.Tick)
 			}
 			return m, nil
 
 		case key.Matches(msg, keys.Back):
-			if m.flags.detailFocused() {
-				m.flags.focusList()
+			if m.flags.detailOpened() {
+				m.flags.closeDetail()
 				return m, nil
 			}
 			// esc otherwise belongs to the list (clears an active filter).
@@ -299,10 +316,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Restore):
 			return m.startRestore()
 
+		case key.Matches(msg, keys.EnvLeft):
+			return m.moveEnvColumn(-1)
+
+		case key.Matches(msg, keys.EnvRight):
+			return m.moveEnvColumn(1)
+
 		case key.Matches(msg, keys.Sort):
 			m.sortMode = nextSortMode(m.sortMode)
-			ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
-			m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
+			m.resort()
 			m.status = "sort: " + string(m.sortMode) + " — " + sortModeHint(m.sortMode)
 			return m, nil
 
@@ -313,13 +335,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Refresh):
 			m.loading = true
-			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived),
+			return m, tea.Batch(loadFlags(m.client, m.project, m.envKeys(), m.showArchived),
 				loadStatuses(m.client, m.project, m.env), m.spinner.Tick)
 
 		case key.Matches(msg, keys.ShowArchived):
 			m.showArchived = !m.showArchived
 			m.loading = true
-			return m, tea.Batch(loadFlags(m.client, m.project, m.env, m.showArchived), m.spinner.Tick)
+			return m, tea.Batch(loadFlags(m.client, m.project, m.envKeys(), m.showArchived), m.spinner.Tick)
 
 		case key.Matches(msg, keys.Env):
 			m.screen = screenEnvPicker
@@ -340,6 +362,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, m.routeToScreen(msg)
 }
 
+// moveEnvColumn steps the matrix column cursor. The focused column *is* the
+// current environment, so this also re-points statuses and env-relative sorts.
+func (m Model) moveEnvColumn(delta int) (tea.Model, tea.Cmd) {
+	env := m.flags.moveEnv(delta)
+	if env == "" {
+		return m, nil
+	}
+	m.env = env
+
+	statuses, cached := m.statusesByEnv[env]
+	m.statuses = statuses
+	m.flags.setStatuses(statuses, env)
+	// Env-relative sorts mean something different in the new column.
+	if m.sortMode == ld.SortLongestOn || m.sortMode == ld.SortRecent || m.sortMode == ld.SortStatus {
+		m.resort()
+	}
+	if cached {
+		return m, nil
+	}
+	return m, loadStatuses(m.client, m.project, env)
+}
+
+// resort re-sorts the flag list for the current env and sort mode, keeping the
+// cursor on whichever flag was selected before the rows moved.
+func (m *Model) resort() {
+	selected := keyOf(m.flags.selected())
+	ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
+	m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
+	m.flags.selectByKey(selected)
+}
+
 // startToggle opens the appropriate confirm modal for toggling the selected flag.
 func (m Model) startToggle() (tea.Model, tea.Cmd) {
 	flag := m.flags.selected()
@@ -358,7 +411,7 @@ func (m Model) startToggle() (tea.Model, tea.Cmd) {
 	turnOn := !envCfg.On
 	prompt := fmt.Sprintf("Turn %s %s in %s?", strings.ToUpper(onOff(turnOn)), flag.Key, m.env)
 	expected := ""
-	if m.envIsGuarded() {
+	if m.envIsGuarded(m.env) {
 		expected = m.env
 	}
 	m.confirm = newConfirmModal(prompt, expected, toggleFlag(m.client, m.project, flag.Key, m.env, turnOn))
@@ -423,9 +476,27 @@ func (m Model) startArchive() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) envIsGuarded() bool {
+// envKeys are the matrix columns to request flag state for. Before the
+// environment list arrives it falls back to the current environment, so the
+// list is never fetched with an empty scope.
+func (m *Model) envKeys() []string {
+	if len(m.envs) == 0 {
+		if m.env == "" {
+			return nil
+		}
+		return []string{m.env}
+	}
+	keys := make([]string, len(m.envs))
+	for i, env := range m.envs {
+		keys[i] = env.Key
+	}
+	return keys
+}
+
+// envIsGuarded reports whether mutations in envKey need a typed confirmation.
+func (m *Model) envIsGuarded(envKey string) bool {
 	for _, env := range m.envs {
-		if env.Key == m.env {
+		if env.Key == envKey {
 			return isGuardedEnv(env, m.guarded)
 		}
 	}

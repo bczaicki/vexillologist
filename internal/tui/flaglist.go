@@ -10,59 +10,30 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bczaicki/vexillologist/internal/ld"
-	"github.com/bczaicki/vexillologist/internal/output"
 )
 
-// flagItem is one row in the flag list.
+// flagItem is one row in the flag list. The per-environment state lives on
+// flag.Environments; the matrix delegate holds the environment list itself.
 type flagItem struct {
 	flag   ld.FeatureFlag
-	env    string
 	status string
-}
-
-func (i flagItem) Title() string {
-	dot := styleOffDot.Render("●")
-	if envCfg, ok := i.flag.Environments[i.env]; ok && envCfg.On {
-		dot = styleOnDot.Render("●")
-	}
-	title := dot + " " + i.flag.Key
-	if i.flag.Archived {
-		title += " " + styleWarn.Render("⚑ archived")
-	}
-	return title
-}
-
-func (i flagItem) Description() string {
-	desc := i.flag.Name
-	if len(i.flag.Tags) > 0 {
-		desc += "  " + styleDim.Render("["+strings.Join(i.flag.Tags, ", ")+"]")
-	}
-	var notes []string
-	if envCfg, ok := i.flag.Environments[i.env]; ok && envCfg.LastModified > 0 {
-		notes = append(notes, "changed "+output.RelativeAge(envCfg.LastModified)+" ago")
-	}
-	if i.status != "" {
-		notes = append(notes, i.status)
-	}
-	if len(notes) > 0 {
-		desc += styleDim.Render(" · " + strings.Join(notes, " · "))
-	}
-	return desc
 }
 
 func (i flagItem) FilterValue() string { return i.flag.Key + " " + i.flag.Name }
 
-// flagList is the main screen: a filterable list on the left, a detail pane
-// on the right.
+// flagList is the main screen: a full-width state matrix (one row per flag,
+// one column per environment), with a detail view that replaces it on demand
+// (enter to open, esc to close).
 type flagList struct {
-	list   list.Model
-	detail viewport.Model
+	list     list.Model
+	delegate *matrixDelegate
+	detail   viewport.Model
 	// full is the last full-representation flag fetched with enter; the
-	// detail pane falls back to the summary of the selected row.
+	// detail view falls back to the summary of the selected row.
 	full *ld.FeatureFlag
-	// detailFocus routes navigation keys to the detail viewport instead of
-	// the list (enter to focus, esc to return).
-	detailFocus bool
+	// detailOpen swaps the list out for the detail view and routes navigation
+	// keys to the viewport.
+	detailOpen bool
 	// statuses are LD evaluation statuses for the current env, keyed by flag
 	// key; may be nil while loading or when unavailable.
 	statuses      map[string]ld.FlagStatus
@@ -71,30 +42,77 @@ type flagList struct {
 }
 
 func newFlagList() flagList {
-	delegate := list.NewDefaultDelegate()
-	delegate.SetSpacing(0)
+	delegate := &matrixDelegate{}
 	l := list.New(nil, delegate, 0, 0)
-	l.Title = "flags"
+	l.SetShowTitle(false) // replaced by the matrix's own column header
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 	l.SetShowHelp(false)
-	return flagList{list: l, detail: viewport.New(0, 0)}
+	// With the title hidden this bar is just the filter-input slot. Its default
+	// style carries a bottom pad, which would make it two lines tall the moment
+	// "/" is pressed and shift every row down; flatten it so the row positions
+	// hold steady.
+	l.Styles.TitleBar = lipgloss.NewStyle().PaddingLeft(gutterWidth)
+	// ←/→ and h/l default to paging; the matrix needs them for the column
+	// cursor. (This also frees u/d, which are the restore key and a scroll.)
+	l.KeyMap.PrevPage = key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("pgup", "prev page"))
+	l.KeyMap.NextPage = key.NewBinding(key.WithKeys("pgdown", "f"), key.WithHelp("pgdn", "next page"))
+	return flagList{list: l, delegate: delegate, detail: viewport.New(0, 0)}
+}
+
+// setEnvironments gives the matrix its columns and points the cursor at env.
+func (f *flagList) setEnvironments(envs []ld.Environment, env string) {
+	f.delegate.envs = envs
+	f.focusEnv(env)
+	f.applySize()
+}
+
+// focusEnv moves the column cursor to env, if present.
+func (f *flagList) focusEnv(env string) {
+	for i, e := range f.delegate.envs {
+		if e.Key == env {
+			f.delegate.cursor = i
+			return
+		}
+	}
+}
+
+// moveEnv steps the column cursor by delta and returns the newly focused
+// environment key ("" when there are no columns or the cursor did not move).
+func (f *flagList) moveEnv(delta int) string {
+	envs := f.delegate.envs
+	if len(envs) == 0 {
+		return ""
+	}
+	next := clamp(f.delegate.cursor+delta, 0, len(envs)-1)
+	if next == f.delegate.cursor {
+		return ""
+	}
+	f.delegate.cursor = next
+	f.applySize() // the visible column window may need to scroll
+	return envs[next].Key
+}
+
+// selectByKey moves the row cursor back to a flag key after a re-sort.
+func (f *flagList) selectByKey(key string) {
+	for i, item := range f.list.Items() {
+		if fi, ok := item.(flagItem); ok && fi.flag.Key == key {
+			f.list.Select(i)
+			return
+		}
+	}
 }
 
 func (f *flagList) setFlags(flags []ld.FeatureFlag, env string, archivedView bool) {
 	f.archivedView = archivedView
 	items := make([]list.Item, len(flags))
 	for i, flag := range flags {
-		items[i] = flagItem{flag: flag, env: env, status: f.statusOf(flag.Key)}
-	}
-	f.list.Title = "flags"
-	if archivedView {
-		f.list.Title = "archived flags"
+		items[i] = flagItem{flag: flag, status: f.statusOf(flag.Key)}
 	}
 	f.list.SetItems(items)
 	f.full = nil
-	f.detailFocus = false
+	f.closeDetail()
 	f.refreshDetail(env)
 }
 
@@ -123,7 +141,7 @@ func (f *flagList) updateFlag(updated *ld.FeatureFlag, env string) {
 	for i, item := range items {
 		if fi, ok := item.(flagItem); ok && fi.flag.Key == updated.Key {
 			// The semantic-patch response has full env configs; keep it.
-			f.list.SetItem(i, flagItem{flag: *updated, env: env})
+			f.list.SetItem(i, flagItem{flag: *updated, status: f.statusOf(updated.Key)})
 			break
 		}
 	}
@@ -165,22 +183,44 @@ func (f *flagList) filtering() bool {
 	return f.list.FilterState() == list.Filtering
 }
 
-func (f *flagList) focusDetail()        { f.detailFocus = true }
-func (f *flagList) focusList()          { f.detailFocus = false }
-func (f *flagList) detailFocused() bool { return f.detailFocus }
+// openDetail swaps the list out for the detail view of the selected flag.
+func (f *flagList) openDetail(env string) {
+	f.detailOpen = true
+	f.applySize()
+	f.refreshDetail(env)
+	f.detail.GotoTop()
+}
+
+func (f *flagList) closeDetail() {
+	f.detailOpen = false
+	f.applySize()
+}
+
+func (f *flagList) detailOpened() bool { return f.detailOpen }
 
 func (f *flagList) setSize(w, h int) {
 	f.width, f.height = w, h
-	h-- // reserve a line for the key-binding help footer
-	listWidth := w * 2 / 5
-	f.list.SetSize(listWidth, h)
-	// Account for the detail pane's border and padding.
-	f.detail.Width = w - listWidth - 4
-	f.detail.Height = h - 2
+	f.applySize()
 }
 
-// refreshDetail re-renders the detail pane for the current selection.
+// applySize gives the whole content area to whichever view is showing, and
+// recomputes the matrix column budget for the new width.
+func (f *flagList) applySize() {
+	h := f.height - 1 // reserve a line for the key-binding help footer
+	f.delegate.layout = computeLayout(f.width, len(f.delegate.envs), f.delegate.cursor)
+	// The matrix header occupies one more line above the list.
+	f.list.SetSize(f.width, max(1, h-1))
+	// Account for the detail view's border and padding.
+	f.detail.Width = max(1, f.width-4)
+	f.detail.Height = max(1, h-2)
+}
+
+// refreshDetail re-renders the detail view for the current selection. It is a
+// no-op while the list is showing, so cursor movement stays cheap.
 func (f *flagList) refreshDetail(env string) {
+	if !f.detailOpen {
+		return
+	}
 	selected := f.selected()
 	if selected == nil {
 		f.detail.SetContent(styleDim.Render("no flag selected"))
@@ -200,10 +240,10 @@ func (f *flagList) refreshDetail(env string) {
 }
 
 func (f *flagList) update(msg tea.Msg, env string) tea.Cmd {
-	// Keys go to whichever pane holds focus; everything else goes to both.
+	// Keys go to whichever view is showing; everything else goes to both.
 	if _, isKey := msg.(tea.KeyMsg); isKey {
 		var cmd tea.Cmd
-		if f.detailFocus {
+		if f.detailOpen {
 			f.detail, cmd = f.detail.Update(msg)
 			return cmd
 		}
@@ -211,7 +251,6 @@ func (f *flagList) update(msg tea.Msg, env string) tea.Cmd {
 		f.list, cmd = f.list.Update(msg)
 		if keyOf(before) != keyOf(f.selected()) {
 			f.full = nil
-			f.refreshDetail(env)
 		}
 		return cmd
 	}
@@ -233,20 +272,16 @@ func keyOf(f *ld.FeatureFlag) string {
 }
 
 func (f *flagList) view() string {
-	detailStyle := styleDetail
+	if f.detailOpen {
+		return styleDetail.Render(f.detail.View()) + "\n" +
+			styleHelpLine.Render(helpFooter(keys.detailHelp(f.archivedView)))
+	}
 	bindings := keys.shortHelp()
 	if f.archivedView {
 		bindings = keys.archivedHelp()
 	}
-	if f.detailFocus {
-		detailStyle = styleDetailFocused
-		bindings = keys.detailHelp()
-	}
-	columns := lipgloss.JoinHorizontal(lipgloss.Top,
-		f.list.View(),
-		detailStyle.Render(f.detail.View()),
-	)
-	return columns + "\n" + styleHelpLine.Render(helpFooter(bindings))
+	return f.delegate.header() + "\n" + f.list.View() + "\n" +
+		styleHelpLine.Render(helpFooter(bindings))
 }
 
 // helpFooter renders key hints, e.g. "t toggle on/off · n new flag · …".

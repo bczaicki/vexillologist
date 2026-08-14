@@ -24,9 +24,14 @@ type flagCreatedMsg *ld.FeatureFlag
 type flagArchivedMsg struct{ key string }
 type flagRestoredMsg struct{ key string }
 
-// statusesLoadedMsg carries flag statuses; nil means they were unavailable
-// (statuses are an enhancement, not worth an error banner).
-type statusesLoadedMsg map[string]ld.FlagStatus
+// statusesLoadedMsg carries flag statuses for one environment; a nil map means
+// they were unavailable (statuses are an enhancement, not worth an error
+// banner). env identifies which column asked, since the cursor may have moved
+// on before the response lands.
+type statusesLoadedMsg struct {
+	env      string
+	statuses map[string]ld.FlagStatus
+}
 type errMsg struct{ err error }
 
 func withTimeout() (context.Context, context.CancelFunc) {
@@ -57,11 +62,18 @@ func loadEnvs(client ld.API, project string) tea.Cmd {
 	}
 }
 
-func loadFlags(client ld.API, project, env string, archived bool) tea.Cmd {
+// loadFlags fetches every flag with its state in each of envKeys — one per
+// matrix column. The keys are always passed explicitly: omitting them and
+// relying on LD to default to "all environments" does not reliably populate
+// the per-environment map, which leaves every cell showing "no config".
+func loadFlags(client ld.API, project string, envKeys []string, archived bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := withTimeout()
 		defer cancel()
-		flags, err := client.ListFlags(ctx, project, ld.ListFlagsOptions{EnvKeys: []string{env}, Archived: archived})
+		flags, err := client.ListFlags(ctx, project, ld.ListFlagsOptions{
+			EnvKeys:  envKeys,
+			Archived: archived,
+		})
 		if err != nil {
 			return errMsg{err}
 		}
@@ -69,11 +81,13 @@ func loadFlags(client ld.API, project, env string, archived bool) tea.Cmd {
 	}
 }
 
-func loadFlagDetail(client ld.API, project, key, env string) tea.Cmd {
+// loadFlagDetail fetches one flag's full representation across envKeys, so the
+// detail view can show targeting for any column.
+func loadFlagDetail(client ld.API, project, key string, envKeys []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := withTimeout()
 		defer cancel()
-		flag, err := client.GetFlag(ctx, project, key, []string{env})
+		flag, err := client.GetFlag(ctx, project, key, envKeys)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -133,8 +147,8 @@ func loadStatuses(client ld.API, project, env string) tea.Cmd {
 		defer cancel()
 		statuses, err := client.GetFlagStatuses(ctx, project, env)
 		if err != nil {
-			return statusesLoadedMsg(nil)
+			return statusesLoadedMsg{env: env}
 		}
-		return statusesLoadedMsg(statuses)
+		return statusesLoadedMsg{env: env, statuses: statuses}
 	}
 }
