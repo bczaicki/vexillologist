@@ -6,6 +6,21 @@ A terminal tool for viewing and managing [LaunchDarkly](https://launchdarkly.com
 
 ## Install
 
+### Prebuilt binary (no Go required)
+
+Grab the archive for your platform from the [releases page](https://github.com/bczaicki/vexillologist/releases), or:
+
+```sh
+# macOS (Apple Silicon) example — adjust os/arch: darwin/linux/windows, arm64/amd64
+curl -sL https://github.com/bczaicki/vexillologist/releases/latest/download/vex_$(curl -s https://api.github.com/repos/bczaicki/vexillologist/releases/latest | grep -o '"tag_name": "v[^"]*' | cut -d'v' -f2)_darwin_arm64.tar.gz | tar xz vex
+sudo mv vex /usr/local/bin/
+vex --version
+```
+
+On macOS, Gatekeeper may quarantine the downloaded binary; clear it with `xattr -d com.apple.quarantine $(which vex)` if you see a "cannot be opened" warning.
+
+### With Go
+
 With Go 1.26+ installed (`brew install go`), install straight from GitHub:
 
 ```sh
