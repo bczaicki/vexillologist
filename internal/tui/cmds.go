@@ -16,9 +16,18 @@ type envsLoadedMsg []ld.Environment
 type flagsLoadedMsg []ld.FeatureFlag
 type flagDetailMsg *ld.FeatureFlag
 type flagToggledMsg struct {
-	flag *ld.FeatureFlag
-	env  string
-	on   bool
+	key string
+	env string
+	on  bool
+}
+
+// flagsRefreshedMsg is a background re-fetch after a mutation. project and
+// archived identify the view that asked, so a response that lands after the
+// user has switched away can be dropped.
+type flagsRefreshedMsg struct {
+	project  string
+	archived bool
+	flags    []ld.FeatureFlag
 }
 type flagCreatedMsg *ld.FeatureFlag
 type flagArchivedMsg struct{ key string }
@@ -99,11 +108,23 @@ func toggleFlag(client ld.API, project, key, env string, on bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := withTimeout()
 		defer cancel()
-		flag, err := client.ToggleFlag(ctx, project, key, env, on, "via vex tui")
-		if err != nil {
+		if _, err := client.ToggleFlag(ctx, project, key, env, on, "via vex tui"); err != nil {
 			return errMsg{err}
 		}
-		return flagToggledMsg{flag: flag, env: env, on: on}
+		return flagToggledMsg{key: key, env: env, on: on}
+	}
+}
+
+// refreshFlags is loadFlags for a background reconcile: it reports as
+// flagsRefreshedMsg, which updates the rows without resetting the view.
+func refreshFlags(client ld.API, project string, envKeys []string, archived bool) tea.Cmd {
+	load := loadFlags(client, project, envKeys, archived)
+	return func() tea.Msg {
+		msg := load()
+		if flags, ok := msg.(flagsLoadedMsg); ok {
+			return flagsRefreshedMsg{project: project, archived: archived, flags: flags}
+		}
+		return msg
 	}
 }
 

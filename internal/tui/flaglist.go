@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"maps"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -94,9 +95,11 @@ func (f *flagList) moveEnv(delta int) string {
 	return envs[next].Key
 }
 
-// selectByKey moves the row cursor back to a flag key after a re-sort.
+// selectByKey moves the row cursor back to a flag key after a re-sort. It
+// searches the visible rows, since the cursor indexes those, not the full set
+// an active filter narrows.
 func (f *flagList) selectByKey(key string) {
-	for i, item := range f.list.Items() {
+	for i, item := range f.list.VisibleItems() {
 		if fi, ok := item.(flagItem); ok && fi.flag.Key == key {
 			f.list.Select(i)
 			return
@@ -104,27 +107,64 @@ func (f *flagList) selectByKey(key string) {
 	}
 }
 
+// setFlags loads a fresh flag set, closing the detail view.
 func (f *flagList) setFlags(flags []ld.FeatureFlag, env string, archivedView bool) {
 	f.archivedView = archivedView
-	items := make([]list.Item, len(flags))
-	for i, flag := range flags {
-		items[i] = flagItem{flag: flag, status: f.statusOf(flag.Key)}
-	}
-	f.list.SetItems(items)
+	f.setItems(flags)
 	f.full = nil
 	f.closeDetail()
 	f.refreshDetail(env)
 }
 
+// replaceFlags swaps in a re-sorted or re-fetched copy of the same flag set
+// without disturbing the view: the cursor stays on the flag it was on, and an
+// open detail view stays open on it.
+func (f *flagList) replaceFlags(flags []ld.FeatureFlag, env string) {
+	selected := keyOf(f.selected())
+	f.setItems(flags)
+	f.selectByKey(selected)
+	if keyOf(f.full) != keyOf(f.selected()) {
+		f.full = nil
+	}
+	f.refreshDetail(env)
+}
+
+func (f *flagList) setItems(flags []ld.FeatureFlag) {
+	items := make([]list.Item, len(flags))
+	for i, flag := range flags {
+		items[i] = flagItem{flag: flag, status: f.statusOf(flag.Key)}
+	}
+	f.syncFilter(f.list.SetItems(items))
+}
+
+// syncFilter runs the list's re-filter command inline. bubbles' list returns
+// one from SetItems whenever a filter is active, and until its result lands
+// the visible rows are stale copies of the old items (SetItems blanks them
+// outright), so selected() and the matrix would both lag the update.
+func (f *flagList) syncFilter(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if matches, ok := cmd().(list.FilterMatchesMsg); ok {
+		f.list, _ = f.list.Update(matches)
+		// SetItems paginated against the blanked rows; recount the real ones.
+		f.list.SetSize(f.list.Width(), f.list.Height())
+	}
+}
+
 // setStatuses stores LD evaluation statuses and refreshes row annotations.
 func (f *flagList) setStatuses(statuses map[string]ld.FlagStatus, env string) {
 	f.statuses = statuses
-	for i, item := range f.list.Items() {
+	old := f.list.Items()
+	items := make([]list.Item, len(old))
+	for i, item := range old {
 		if fi, ok := item.(flagItem); ok {
 			fi.status = f.statusOf(fi.flag.Key)
-			f.list.SetItem(i, fi)
+			item = fi
 		}
+		items[i] = item
 	}
+	f.syncFilter(f.list.SetItems(items))
 	f.refreshDetail(env)
 }
 
@@ -135,20 +175,27 @@ func (f *flagList) statusOf(key string) string {
 	return ""
 }
 
-// updateFlag replaces one flag in the list (after a toggle) in place.
-func (f *flagList) updateFlag(updated *ld.FeatureFlag, env string) {
-	items := f.list.Items()
-	for i, item := range items {
-		if fi, ok := item.(flagItem); ok && fi.flag.Key == updated.Key {
-			// The semantic-patch response has full env configs; keep it.
-			f.list.SetItem(i, flagItem{flag: *updated, status: f.statusOf(updated.Key)})
-			break
-		}
+// markToggled flips env's on/off state on the detail view's full flag, so it
+// agrees with the matrix row until the re-fetch lands.
+func (f *flagList) markToggled(key, env string, on bool) {
+	if f.full != nil && f.full.Key == key {
+		full := *f.full
+		full.Environments = withEnvOn(full.Environments, env, on)
+		f.full = &full
 	}
-	if f.full != nil && f.full.Key == updated.Key {
-		f.full = updated
+}
+
+// withEnvOn returns envs with env's on/off state set. It copies rather than
+// mutating, because list rows share their Environments maps with rawFlags.
+func withEnvOn(envs map[string]ld.FlagEnvConfig, env string, on bool) map[string]ld.FlagEnvConfig {
+	cfg, ok := envs[env]
+	if !ok {
+		return envs
 	}
-	f.refreshDetail(env)
+	out := maps.Clone(envs)
+	cfg.On = on
+	out[env] = cfg
+	return out
 }
 
 // removeFlag drops a flag from the list (after archiving).

@@ -176,11 +176,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flags.setFullDetail(msg, m.env)
 		return m, nil
 
+	case flagsRefreshedMsg:
+		if msg.project != m.project || msg.archived != m.showArchived {
+			// A stale reconcile for a view the user has since left.
+			return m, nil
+		}
+		m.rawFlags = msg.flags
+		m.resort()
+		return m, nil
+
 	case flagToggledMsg:
 		m.loading = false
-		m.flags.updateFlag(msg.flag, m.env)
-		m.status = fmt.Sprintf("✓ %s is now %s in %s", msg.flag.Key, onOff(msg.on), msg.env)
-		return m, nil
+		m.markToggled(msg.key, msg.env, msg.on)
+		m.status = fmt.Sprintf("✓ %s is now %s in %s", msg.key, onOff(msg.on), msg.env)
+		return m, m.reconcileToggle(msg.key, msg.env)
 
 	case flagCreatedMsg:
 		m.loading = false
@@ -385,12 +394,39 @@ func (m Model) moveEnvColumn(delta int) (tea.Model, tea.Cmd) {
 }
 
 // resort re-sorts the flag list for the current env and sort mode, keeping the
-// cursor on whichever flag was selected before the rows moved.
+// cursor (and any open detail view) on whichever flag was selected before the
+// rows moved.
 func (m *Model) resort() {
-	selected := keyOf(m.flags.selected())
 	ld.SortFlags(m.rawFlags, m.sortMode, m.env, m.statuses)
-	m.flags.setFlags(m.rawFlags, m.env, m.showArchived)
-	m.flags.selectByKey(selected)
+	m.flags.replaceFlags(m.rawFlags, m.env)
+}
+
+// markToggled flips one matrix cell locally so a confirmed toggle shows at
+// once, rather than after reconcileToggle's round trip.
+func (m *Model) markToggled(key, env string, on bool) {
+	for i := range m.rawFlags {
+		if m.rawFlags[i].Key == key {
+			m.rawFlags[i].Environments = withEnvOn(m.rawFlags[i].Environments, env, on)
+			break
+		}
+	}
+	m.flags.markToggled(key, env, on)
+	// On/off state and lastModified feed the env-relative sorts.
+	m.resort()
+}
+
+// reconcileToggle quietly re-fetches everything a toggle in env can change:
+// every row's state (lastModified, plus anyone else's edits), env's evaluation
+// statuses, and the open detail view's targeting.
+func (m *Model) reconcileToggle(key, env string) tea.Cmd {
+	cmds := []tea.Cmd{
+		refreshFlags(m.client, m.project, m.envKeys(), m.showArchived),
+		loadStatuses(m.client, m.project, env),
+	}
+	if m.flags.detailOpened() {
+		cmds = append(cmds, loadFlagDetail(m.client, m.project, key, m.envKeys()))
+	}
+	return tea.Batch(cmds...)
 }
 
 // startToggle opens the appropriate confirm modal for toggling the selected flag.

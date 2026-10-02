@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/exp/teatest"
@@ -42,8 +43,8 @@ func (f *fakeAPI) ListEnvironments(ctx context.Context, projectKey string) ([]ld
 // what produced an all-dashes matrix, so the fake reproduces it faithfully.
 func (f *fakeAPI) ListFlags(ctx context.Context, projectKey string, opts ld.ListFlagsOptions) ([]ld.FeatureFlag, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.listEnvKeys = append(f.listEnvKeys, strings.Join(opts.EnvKeys, ","))
-	f.mu.Unlock()
 
 	src := f.flags
 	if opts.Archived {
@@ -69,9 +70,11 @@ func scopeEnvs(envs map[string]ld.FlagEnvConfig, keys []string) map[string]ld.Fl
 }
 
 func (f *fakeAPI) GetFlag(ctx context.Context, projectKey, flagKey string, envKeys []string) (*ld.FeatureFlag, error) {
-	for i := range f.flags {
-		if f.flags[i].Key == flagKey {
-			return &f.flags[i], nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, flag := range f.flags {
+		if flag.Key == flagKey {
+			return &flag, nil
 		}
 	}
 	return nil, &ld.APIError{StatusCode: 404, Code: "not_found", Message: "flag not found"}
@@ -85,9 +88,17 @@ func (f *fakeAPI) CreateFlag(ctx context.Context, projectKey string, params ld.C
 	return &flag, nil
 }
 
+// ToggleFlag records the call and applies it to the stored flag, so later
+// reads see it as they would from LaunchDarkly. Its response carries only the
+// toggled environment: the TUI must not rely on it for the rest of the matrix.
 func (f *fakeAPI) ToggleFlag(ctx context.Context, projectKey, flagKey, envKey string, on bool, comment string) (*ld.FeatureFlag, error) {
 	f.mu.Lock()
 	f.toggles = append(f.toggles, flagKey+":"+envKey+":"+onOff(on))
+	for i := range f.flags {
+		if f.flags[i].Key == flagKey {
+			f.flags[i].Environments = withEnvOn(f.flags[i].Environments, envKey, on)
+		}
+	}
 	f.mu.Unlock()
 	return &ld.FeatureFlag{
 		Key:          flagKey,
@@ -111,6 +122,8 @@ func (f *fakeAPI) RestoreFlag(ctx context.Context, projectKey, flagKey, comment 
 }
 
 func (f *fakeAPI) GetFlagStatuses(ctx context.Context, projectKey, envKey string) (map[string]ld.FlagStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.statuses, nil
 }
 
@@ -145,6 +158,54 @@ func waitForOutput(t *testing.T, tm *teatest.TestModel, want string) {
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return bytes.Contains(b, []byte(want))
 	}, teatest.WithDuration(5*time.Second))
+}
+
+// settle feeds msgs to m, runs every command that produces, and feeds the
+// results back until nothing is left: a synchronous stand-in for the bubbletea
+// runtime, for asserting on model state without racing background commands.
+func settle(t *testing.T, m Model, msgs ...tea.Msg) Model {
+	t.Helper()
+	for len(msgs) > 0 {
+		var msg tea.Msg
+		msg, msgs = msgs[0], msgs[1:]
+		next, cmd := m.Update(msg)
+		m = next.(Model)
+		msgs = append(msgs, runCmd(cmd)...)
+	}
+	return m
+}
+
+// runCmd executes cmd and returns the messages the app consumes. Spinner
+// ticks and cursor blinks are dropped: fed back, they re-arm forever.
+func runCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		var out []tea.Msg
+		for _, c := range msg {
+			out = append(out, runCmd(c)...)
+		}
+		return out
+	case projectsLoadedMsg, envsLoadedMsg, flagsLoadedMsg, flagsRefreshedMsg,
+		flagDetailMsg, flagToggledMsg, flagCreatedMsg, flagArchivedMsg,
+		flagRestoredMsg, statusesLoadedMsg, errMsg, list.FilterMatchesMsg:
+		return []tea.Msg{msg}
+	}
+	return nil
+}
+
+// loadedModel is a flag-list model with its initial loads applied.
+func loadedModel(t *testing.T, fake *fakeAPI, env string) Model {
+	t.Helper()
+	m := New(fake, cli.TUIOptions{Project: "horizon", Environment: env})
+	m = settle(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	return settle(t, m, runCmd(m.Init())...)
+}
+
+func keyPress(s string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
 
 func TestFlagListRenders(t *testing.T) {
@@ -215,6 +276,115 @@ func TestToggleGuardedEnvRequiresTypedKey(t *testing.T) {
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// A toggle is followed by a re-fetch, so the screen shows LaunchDarkly's
+// current state rather than only the one cell the toggle flipped.
+func TestToggleRefreshesFlagsAndStatuses(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	// Meanwhile a teammate turns production off and adds a flag, and LD's
+	// evaluation status moves on.
+	fake.mu.Lock()
+	fake.flags[0].Environments = map[string]ld.FlagEnvConfig{
+		"staging":    {On: false},
+		"production": {On: false},
+	}
+	fake.flags = append(fake.flags, ld.FeatureFlag{Key: "teammate-flag",
+		Environments: map[string]ld.FlagEnvConfig{"staging": {On: true}}})
+	fake.statuses = map[string]ld.FlagStatus{"connect1-rollout-geofencing": {Name: "launched"}}
+	fake.mu.Unlock()
+
+	m = settle(t, m, keyPress("t"))
+	m = settle(t, m, keyPress("y"))
+
+	if got := len(m.rawFlags); got != 2 {
+		t.Fatalf("rawFlags has %d flags after toggle, want the re-fetched 2", got)
+	}
+	m.flags.selectByKey("connect1-rollout-geofencing")
+	envs := m.flags.selected().Environments
+	if !envs["staging"].On {
+		t.Error("staging still off in the matrix after toggling it on")
+	}
+	if envs["production"].On {
+		t.Error("production still on: the re-fetch did not replace local state")
+	}
+	if got := m.flags.statusOf("connect1-rollout-geofencing"); got != "launched" {
+		t.Errorf("status = %q, want the re-fetched %q", got, "launched")
+	}
+	// The background refresh must not clobber the toggle's confirmation.
+	if !strings.Contains(m.status, "is now on in staging") {
+		t.Errorf("status line = %q, want the toggle confirmation", m.status)
+	}
+}
+
+// The toggled cell flips as soon as LD confirms, and stays flipped through a
+// re-sort while the re-fetch is still in flight. Regression: only the list row
+// was patched, so re-sorting rebuilt it from the stale rawFlags.
+func TestToggleSurvivesResortBeforeRefresh(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	// The confirmation lands; its re-fetch commands are deliberately not run.
+	next, refresh := m.Update(flagToggledMsg{key: "connect1-rollout-geofencing", env: "staging", on: true})
+	m = next.(Model)
+	if refresh == nil {
+		t.Fatal("toggle confirmation scheduled no re-fetch")
+	}
+	if !m.flags.selected().Environments["staging"].On {
+		t.Error("cell did not flip on confirmation")
+	}
+
+	m = settle(t, m, keyPress("s")) // cycle the sort, which rebuilds the rows
+	if !m.flags.selected().Environments["staging"].On {
+		t.Error("re-sort reverted the toggled cell")
+	}
+}
+
+// Regression: with a filter applied, the list row was updated behind the
+// filter's copy, so the visible cell stayed stale and the next toggle offered
+// to turn the flag on again.
+func TestToggleUnderFilterUpdatesVisibleRow(t *testing.T) {
+	fake := newFake()
+	fake.flags = append(fake.flags, ld.FeatureFlag{Key: "other-flag",
+		Environments: map[string]ld.FlagEnvConfig{"staging": {On: false}}})
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("/"), keyPress("geo"), tea.KeyMsg{Type: tea.KeyEnter})
+	if n := len(m.flags.list.VisibleItems()); n != 1 {
+		t.Fatalf("filter shows %d rows, want 1", n)
+	}
+
+	m = settle(t, m, keyPress("t"), keyPress("y"))
+	if n := len(m.flags.list.VisibleItems()); n != 1 {
+		t.Fatalf("filtered list shows %d rows after the refresh, want 1", n)
+	}
+	selected := m.flags.selected()
+	if selected == nil || !selected.Environments["staging"].On {
+		t.Fatalf("visible row is stale after toggle: %+v", selected)
+	}
+
+	m = settle(t, m, keyPress("t"))
+	if m.confirm == nil || !strings.Contains(m.confirm.prompt, "Turn OFF") {
+		t.Errorf("second toggle should offer to turn the flag off, got %+v", m.confirm)
+	}
+}
+
+// Toggling from the detail view keeps it open and shows the new state.
+func TestToggleInDetailViewKeepsDetailOpen(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = settle(t, m, keyPress("t"), keyPress("y"))
+
+	if !m.flags.detailOpened() {
+		t.Fatal("detail view closed by the post-toggle refresh")
+	}
+	if m.flags.full == nil || !m.flags.full.Environments["staging"].On {
+		t.Errorf("detail shows stale targeting: %+v", m.flags.full)
+	}
 }
 
 func TestArchiveRequiresTypedFlagKey(t *testing.T) {
