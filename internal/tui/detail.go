@@ -32,7 +32,8 @@ func renderFlagDetail(f *ld.FeatureFlag, env string, width int, fullyLoaded bool
 	}
 	b.WriteString("\n")
 
-	fmt.Fprintf(&b, "kind: %s   temporary: %v\n", f.Kind, f.Temporary)
+	fmt.Fprintf(&b, "kind: %s\n", f.Kind)
+	fmt.Fprintf(&b, "settings: %s\n", f.SettingsSummary())
 	if f.CreationDate > 0 {
 		fmt.Fprintf(&b, "created: %s ago\n", output.RelativeAge(f.CreationDate))
 	}

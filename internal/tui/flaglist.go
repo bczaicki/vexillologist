@@ -198,6 +198,23 @@ func withEnvOn(envs map[string]ld.FlagEnvConfig, env string, on bool) map[string
 	return out
 }
 
+// markSettings copies updated's flag-wide settings onto the detail view's
+// full flag.
+func (f *flagList) markSettings(updated *ld.FeatureFlag) {
+	if f.full != nil && f.full.Key == updated.Key {
+		full := withSettingsOf(*f.full, updated)
+		f.full = &full
+	}
+}
+
+// withSettingsOf returns flag with src's flag-wide settings. Only those are
+// taken: src is a mutation response, whose environment scope may differ.
+func withSettingsOf(flag ld.FeatureFlag, src *ld.FeatureFlag) ld.FeatureFlag {
+	flag.ClientSideAvailability = src.ClientSideAvailability
+	flag.Temporary = src.Temporary
+	return flag
+}
+
 // removeFlag drops a flag from the list (after archiving).
 func (f *flagList) removeFlag(key, env string) {
 	for i, item := range f.list.Items() {

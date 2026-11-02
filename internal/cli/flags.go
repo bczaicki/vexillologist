@@ -22,6 +22,7 @@ func newFlagsCmd(g *globals) *cobra.Command {
 		newFlagsGetCmd(g),
 		newFlagsToggleCmd(g),
 		newFlagsCreateCmd(g),
+		newFlagsSettingsCmd(g),
 		newFlagsArchiveCmd(g),
 		newFlagsRestoreCmd(g),
 		newFlagsStatusesCmd(g),
@@ -183,7 +184,8 @@ func printFlagHuman(cmd *cobra.Command, f *ld.FeatureFlag) error {
 	if f.Description != "" {
 		fmt.Fprintf(out, "  %s\n", f.Description)
 	}
-	fmt.Fprintf(out, "  kind: %s   archived: %v   temporary: %v\n", f.Kind, f.Archived, f.Temporary)
+	fmt.Fprintf(out, "  kind: %s   archived: %v\n", f.Kind, f.Archived)
+	fmt.Fprintf(out, "  settings: %s\n", f.SettingsSummary())
 	if len(f.Tags) > 0 {
 		fmt.Fprintf(out, "  tags: %s\n", strings.Join(f.Tags, ", "))
 	}
@@ -278,12 +280,15 @@ func newFlagsToggleCmd(g *globals) *cobra.Command {
 func newFlagsCreateCmd(g *globals) *cobra.Command {
 	var name, description string
 	var tags []string
-	var temporary bool
+	var temporary, permanent, clientSide, mobile bool
 	cmd := &cobra.Command{
 		Use:   "create <flag-key>",
 		Short: "Create a new boolean flag",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if temporary && permanent {
+				return usageErrorf("--temporary and --permanent are mutually exclusive")
+			}
 			project, err := g.requireProject()
 			if err != nil {
 				return err
@@ -293,7 +298,11 @@ func newFlagsCreateCmd(g *globals) *cobra.Command {
 				Name:        name,
 				Description: description,
 				Tags:        tags,
-				Temporary:   temporary,
+				Temporary:   !permanent,
+				ClientSideAvailability: &ld.ClientSideAvailability{
+					UsingEnvironmentID: clientSide,
+					UsingMobileKey:     mobile,
+				},
 			}
 			if params.Name == "" {
 				params.Name = args[0]
@@ -321,7 +330,73 @@ func newFlagsCreateCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "human-readable flag name (defaults to the key)")
 	cmd.Flags().StringVar(&description, "description", "", "flag description")
 	cmd.Flags().StringSliceVar(&tags, "tags", nil, "comma-separated tags")
+	cmd.Flags().BoolVar(&clientSide, "client-side", true, "make the flag available to client-side SDKs (client-side ID)")
+	cmd.Flags().BoolVar(&mobile, "mobile", false, "make the flag available to mobile SDKs (mobile key)")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "mark the flag as permanent (flags are temporary by default)")
 	cmd.Flags().BoolVar(&temporary, "temporary", false, "mark the flag as temporary")
+	_ = cmd.Flags().MarkDeprecated("temporary", "flags are temporary unless --permanent is passed")
+	return cmd
+}
+
+func newFlagsSettingsCmd(g *globals) *cobra.Command {
+	var clientSide, mobile, permanent bool
+	var comment string
+	cmd := &cobra.Command{
+		Use:   "settings <flag-key>",
+		Short: "Change a flag's SDK availability or temporary/permanent setting (affects ALL environments)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Only the settings actually passed are changed.
+			var update ld.FlagSettingsUpdate
+			if cmd.Flags().Changed("client-side") {
+				update.ClientSide = &clientSide
+			}
+			if cmd.Flags().Changed("mobile") {
+				update.Mobile = &mobile
+			}
+			if cmd.Flags().Changed("permanent") {
+				update.Permanent = &permanent
+			}
+			if update.Empty() {
+				return usageErrorf("pass at least one of --client-side, --mobile, or --permanent")
+			}
+			project, err := g.requireProject()
+			if err != nil {
+				return err
+			}
+			flagKey := args[0]
+			if g.dryRun {
+				return emitDryRun(cmd, g, "updateFlagSettings", "", ld.FlagSettingsPatch(update, comment))
+			}
+			client, err := g.newClient()
+			if err != nil {
+				return err
+			}
+			// Settings are flag-wide. Taking a flag away from an SDK breaks
+			// every app evaluating it, so that gets the type-the-key
+			// confirmation archiving does.
+			desc := fmt.Sprintf("Set %s on flag %q in project %q — this affects ALL environments",
+				update.Describe(), flagKey, project)
+			if err := g.confirm(desc, flagKey, update.DisablesSDK()); err != nil {
+				return err
+			}
+			flag, err := client.UpdateFlagSettings(cmd.Context(), project, flagKey, update, comment)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return output.JSON(cmd.OutOrStdout(), output.MutationResult{
+					OK: true, Action: "updateFlagSettings", Flag: flag,
+				})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ %s: %s\n", flagKey, flag.SettingsSummary())
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&clientSide, "client-side", false, "make the flag available to client-side SDKs (--client-side=false to remove)")
+	cmd.Flags().BoolVar(&mobile, "mobile", false, "make the flag available to mobile SDKs (--mobile=false to remove)")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "mark the flag permanent (--permanent=false for temporary)")
+	cmd.Flags().StringVar(&comment, "comment", "via vex", "audit-log comment for the change")
 	return cmd
 }
 

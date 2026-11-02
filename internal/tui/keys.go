@@ -4,6 +4,7 @@ import "github.com/charmbracelet/bubbles/key"
 
 type keyMap struct {
 	Toggle       key.Binding
+	Settings     key.Binding
 	EnvLeft      key.Binding
 	EnvRight     key.Binding
 	New          key.Binding
@@ -23,6 +24,7 @@ type keyMap struct {
 
 var keys = keyMap{
 	Toggle:       key.NewBinding(key.WithKeys("t", " "), key.WithHelp("t/space", "toggle on/off")),
+	Settings:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "settings")),
 	EnvLeft:      key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/→", "env column")),
 	EnvRight:     key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→", "next env")),
 	New:          key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new flag")),
@@ -42,7 +44,7 @@ var keys = keyMap{
 
 // shortHelp is the footer hint line on the flag list screen.
 func (k keyMap) shortHelp() []key.Binding {
-	return []key.Binding{k.EnvLeft, k.Toggle, k.Detail, k.Sort, k.New, k.Archive, k.Filter, k.ShowArchived, k.Project, k.Quit}
+	return []key.Binding{k.EnvLeft, k.Toggle, k.Detail, k.Sort, k.New, k.Settings, k.Archive, k.Filter, k.ShowArchived, k.Project, k.Quit}
 }
 
 // archivedHelp is the footer hint line in the archived-flags view.
@@ -53,15 +55,17 @@ func (k keyMap) archivedHelp() []key.Binding {
 
 // detailHelp is the footer hint line while the detail view is open.
 func (k keyMap) detailHelp(archivedView bool) []key.Binding {
-	action := k.Archive
-	if archivedView {
-		action = k.Restore
-	}
-	return []key.Binding{
+	bindings := []key.Binding{
 		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "scroll")),
 		k.Toggle,
-		action,
+	}
+	if archivedView {
+		bindings = append(bindings, k.Restore)
+	} else {
+		bindings = append(bindings, k.Settings, k.Archive)
+	}
+	return append(bindings,
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back to list")),
 		k.Quit,
-	}
+	)
 }
