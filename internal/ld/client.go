@@ -38,6 +38,7 @@ type API interface {
 	ToggleFlag(ctx context.Context, projectKey, flagKey, envKey string, on bool, comment string) (*FeatureFlag, error)
 	ArchiveFlag(ctx context.Context, projectKey, flagKey, comment string) (*FeatureFlag, error)
 	RestoreFlag(ctx context.Context, projectKey, flagKey, comment string) (*FeatureFlag, error)
+	UpdateFlagSettings(ctx context.Context, projectKey, flagKey string, u FlagSettingsUpdate, comment string) (*FeatureFlag, error)
 	GetFlagStatuses(ctx context.Context, projectKey, envKey string) (map[string]FlagStatus, error)
 }
 

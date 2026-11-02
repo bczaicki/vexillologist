@@ -27,7 +27,10 @@ type fakeAPI struct {
 	toggles       []string // "key:env:on"
 	archives      []string
 	restores      []string
-	listEnvKeys   []string // the EnvKeys of each ListFlags call, comma-joined
+	created       []ld.CreateFlagParams
+	// settingsUpdates are the UpdateFlagSettings calls, in order.
+	settingsUpdates []ld.FlagSettingsUpdate
+	listEnvKeys     []string // the EnvKeys of each ListFlags call, comma-joined
 }
 
 func (f *fakeAPI) ListProjects(ctx context.Context) ([]ld.Project, error) {
@@ -81,11 +84,43 @@ func (f *fakeAPI) GetFlag(ctx context.Context, projectKey, flagKey string, envKe
 }
 
 func (f *fakeAPI) CreateFlag(ctx context.Context, projectKey string, params ld.CreateFlagParams) (*ld.FeatureFlag, error) {
-	flag := ld.FeatureFlag{Key: params.Key, Name: params.Name}
+	flag := ld.FeatureFlag{Key: params.Key, Name: params.Name, Temporary: params.Temporary,
+		ClientSideAvailability: params.ClientSideAvailability}
 	f.mu.Lock()
+	f.created = append(f.created, params)
 	f.flags = append(f.flags, flag)
 	f.mu.Unlock()
 	return &flag, nil
+}
+
+// UpdateFlagSettings records the call and applies it to the stored flag.
+func (f *fakeAPI) UpdateFlagSettings(ctx context.Context, projectKey, flagKey string, u ld.FlagSettingsUpdate, comment string) (*ld.FeatureFlag, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.settingsUpdates = append(f.settingsUpdates, u)
+	for i := range f.flags {
+		if f.flags[i].Key != flagKey {
+			continue
+		}
+		flag := &f.flags[i]
+		avail := ld.ClientSideAvailability{}
+		if flag.ClientSideAvailability != nil {
+			avail = *flag.ClientSideAvailability
+		}
+		if u.ClientSide != nil {
+			avail.UsingEnvironmentID = *u.ClientSide
+		}
+		if u.Mobile != nil {
+			avail.UsingMobileKey = *u.Mobile
+		}
+		flag.ClientSideAvailability = &avail
+		if u.Permanent != nil {
+			flag.Temporary = !*u.Permanent
+		}
+		updated := *flag
+		return &updated, nil
+	}
+	return nil, &ld.APIError{StatusCode: 404, Code: "not_found", Message: "flag not found"}
 }
 
 // ToggleFlag records the call and applies it to the stored flag, so later
@@ -135,9 +170,11 @@ func newFake() *fakeAPI {
 		},
 		flags: []ld.FeatureFlag{
 			{
-				Key:  "connect1-rollout-geofencing",
-				Name: "Rollout Geofencing",
-				Kind: "boolean",
+				Key:                    "connect1-rollout-geofencing",
+				Name:                   "Rollout Geofencing",
+				Kind:                   "boolean",
+				Temporary:              true,
+				ClientSideAvailability: &ld.ClientSideAvailability{UsingEnvironmentID: true},
 				Environments: map[string]ld.FlagEnvConfig{
 					"staging":    {On: false},
 					"production": {On: true},
@@ -190,7 +227,7 @@ func runCmd(cmd tea.Cmd) []tea.Msg {
 		return out
 	case projectsLoadedMsg, envsLoadedMsg, flagsLoadedMsg, flagsRefreshedMsg,
 		flagDetailMsg, flagToggledMsg, flagCreatedMsg, flagArchivedMsg,
-		flagRestoredMsg, statusesLoadedMsg, errMsg, list.FilterMatchesMsg:
+		flagRestoredMsg, flagSettingsUpdatedMsg, statusesLoadedMsg, errMsg, list.FilterMatchesMsg:
 		return []tea.Msg{msg}
 	}
 	return nil
@@ -761,5 +798,147 @@ func TestKebabToCamel(t *testing.T) {
 		if got := kebabToCamel(in); got != want {
 			t.Errorf("kebabToCamel(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func enterKey() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
+
+func TestCreateFormDefaultsToClientSideTemporary(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("n"), keyPress("My New Flag"))
+	// enter walks name → key → description → tags → the three setting rows,
+	// and submits from the last one.
+	for range fieldCount {
+		m = settle(t, m, enterKey())
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.created) != 1 {
+		t.Fatalf("created = %+v", fake.created)
+	}
+	got := fake.created[0]
+	if got.Key != "my-new-flag" || !got.Temporary {
+		t.Errorf("params = %+v, want key my-new-flag, temporary", got)
+	}
+	if a := got.ClientSideAvailability; a == nil || !a.UsingEnvironmentID || a.UsingMobileKey {
+		t.Errorf("clientSideAvailability = %+v, want client-side on, mobile off", a)
+	}
+}
+
+func TestCreateFormSettingRowsToggle(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("n"), keyPress("perm flag"))
+	for range textFieldCount { // to the client-side row
+		m = settle(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	}
+	// client-side off, mobile on, permanent on, then submit.
+	settle(t, m, keyPress(" "), tea.KeyMsg{Type: tea.KeyTab}, keyPress(" "),
+		tea.KeyMsg{Type: tea.KeyTab}, keyPress(" "), enterKey())
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.created) != 1 {
+		t.Fatalf("created = %+v", fake.created)
+	}
+	got := fake.created[0]
+	if got.Temporary {
+		t.Error("flag created temporary, want permanent")
+	}
+	if a := got.ClientSideAvailability; a == nil || a.UsingEnvironmentID || !a.UsingMobileKey {
+		t.Errorf("clientSideAvailability = %+v, want client-side off, mobile on", a)
+	}
+}
+
+func TestSettingsModalMakesFlagPermanent(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("e"))
+	if m.settings == nil {
+		t.Fatal("e did not open the settings modal")
+	}
+	if !strings.Contains(m.View(), "[x] available on client-side SDKs") {
+		t.Errorf("modal does not show the flag's current settings:\n%s", m.View())
+	}
+	// Down to "permanent flag", tick it, apply, confirm.
+	m = settle(t, m, keyPress("j"), keyPress("j"), keyPress(" "), enterKey())
+	if m.confirm == nil || m.confirm.expected != "" {
+		t.Fatalf("want a plain y/n confirm, got %+v", m.confirm)
+	}
+	m = settle(t, m, keyPress("y"))
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.settingsUpdates) != 1 {
+		t.Fatalf("settingsUpdates = %+v", fake.settingsUpdates)
+	}
+	u := fake.settingsUpdates[0]
+	if u.Permanent == nil || !*u.Permanent || u.ClientSide != nil || u.Mobile != nil {
+		t.Errorf("update = %+v, want only permanent=true", u)
+	}
+	if m.rawFlags[0].Temporary {
+		t.Error("row still shows the flag as temporary")
+	}
+	if !strings.Contains(m.status, "permanent") {
+		t.Errorf("status = %q", m.status)
+	}
+}
+
+// Taking a flag away from an SDK breaks every app evaluating it, so it gets
+// archiving's type-the-key guard rather than y/n.
+func TestSettingsDisablingSDKRequiresTypedFlagKey(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("e"), keyPress(" "), enterKey())
+	if m.confirm == nil || m.confirm.expected != "connect1-rollout-geofencing" {
+		t.Fatalf("want a typed-key confirm, got %+v", m.confirm)
+	}
+	m = settle(t, m, keyPress("y"), enterKey())
+	fake.mu.Lock()
+	if len(fake.settingsUpdates) != 0 {
+		t.Errorf("update fired on y: %+v", fake.settingsUpdates)
+	}
+	fake.mu.Unlock()
+
+	m = settle(t, m, tea.KeyMsg{Type: tea.KeyBackspace}, keyPress("connect1-rollout-geofencing"), enterKey())
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.settingsUpdates) != 1 {
+		t.Fatalf("settingsUpdates = %+v", fake.settingsUpdates)
+	}
+	if u := fake.settingsUpdates[0]; u.ClientSide == nil || *u.ClientSide {
+		t.Errorf("update = %+v, want client-side off", u)
+	}
+	if a := m.rawFlags[0].ClientSideAvailability; a == nil || a.UsingEnvironmentID {
+		t.Errorf("row availability = %+v, want client-side off", a)
+	}
+}
+
+func TestSettingsModalWithoutChangesSendsNothing(t *testing.T) {
+	fake := newFake()
+	m := loadedModel(t, fake, "staging")
+
+	m = settle(t, m, keyPress("e"), keyPress(" "), keyPress(" "), enterKey())
+	if m.settings != nil || m.confirm != nil {
+		t.Errorf("modal still open: settings=%v confirm=%v", m.settings, m.confirm)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.settingsUpdates) != 0 {
+		t.Errorf("settingsUpdates = %+v", fake.settingsUpdates)
+	}
+}
+
+func TestDetailShowsSettings(t *testing.T) {
+	flag := newFake().flags[0]
+	got := renderFlagDetail(&flag, "staging", 80, true, nil)
+	if !strings.Contains(got, "client-side SDKs on · mobile SDKs off · temporary") {
+		t.Errorf("detail missing settings line:\n%s", got)
 	}
 }

@@ -108,6 +108,7 @@ The detail view is opened on demand with `enter` and replaces the matrix until y
 | `t` or `space` | toggle flag on/off in the cursor's environment |
 | `s` | cycle sort: key → name → created → **longest-on** → recent → status |
 | `n` | create a new flag |
+| `e` | edit the flag's settings: client-side / mobile SDK availability, permanent |
 | `a` | archive flag (all environments) |
 | `u` | restore an archived flag |
 | `A` | switch between active and archived flags (archived rows are marked `⚑`) |
@@ -118,9 +119,11 @@ The detail view is opened on demand with `enter` and replaces the matrix until y
 
 The `status` column is the flag's LaunchDarkly **evaluation status** in the cursor's environment — `new`, `active`, `launched` (serving one variation to everyone — retirement candidate), or `inactive` (no evaluations for 7+ days — archive candidate). It's dropped on narrow terminals to keep the matrix readable. The `longest-on` sort puts on-flags first, longest-unchanged first, and the `status` sort floats archive candidates to the top; because both are defined relative to an environment, moving the column cursor re-sorts (keeping your place on the same flag).
 
-The detail view shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()` — plus its creation age, per-environment change ages, and evaluation status.
+The create form (`n`) and the settings modal (`e`) carry LaunchDarkly's "advanced controls": **available on client-side SDKs**, **available on mobile SDKs**, and **permanent flag** (`space` toggles a row). New flags default to client-side on, mobile off, temporary. These settings are flag-wide, so they apply to every environment at once.
 
-**Guardrails**: environments that LaunchDarkly marks critical, are named `prod`/`production`, or are listed under `guarded_environments:` in the config file require typing the environment key to confirm a toggle. Archiving always requires typing the flag key.
+The detail view shows each flag's camelCase key — the identifier the LaunchDarkly React SDK exposes via `useFlags()` — plus its creation age, settings, per-environment change ages, and evaluation status.
+
+**Guardrails**: environments that LaunchDarkly marks critical, are named `prod`/`production`, or are listed under `guarded_environments:` in the config file require typing the environment key to confirm a toggle. Archiving, and taking a flag away from client-side or mobile SDKs (which breaks every app evaluating it), always require typing the flag key.
 
 ## CLI (for agents and scripts)
 
@@ -137,9 +140,14 @@ vex flags statuses -p my-project -e staging --json            # evaluation statu
 vex flags get my-flag-key -p my-project -e staging --json
 vex flags toggle my-flag-key -p my-project -e staging --on --yes --json
 vex flags create new-flag-key -p my-project --name "New Flag" --tags team-a --json
+vex flags create new-flag-key -p my-project --mobile --permanent        # client-side is on by default
+vex flags settings my-flag-key -p my-project --mobile --yes --json      # change only what you pass
+vex flags settings my-flag-key -p my-project --client-side=false --permanent=false --yes
 vex flags archive old-flag-key -p my-project --yes --json
 vex flags restore old-flag-key -p my-project --yes --json
 ```
+
+`flags create` defaults to `--client-side` on, `--mobile` off, and temporary (`--permanent` to opt out). `flags settings` changes only the settings you pass, across all environments.
 
 `--sort` accepts `key`, `name`, `created` (newest first), `longest-on` (on-flags, oldest change first), `recent` (latest change first), and `status` (inactive → launched → new → active). The human table includes `CHANGED` (time since the flag last changed in the environment) and `STATUS` columns; `--json` returns the raw flag resources in the sorted order, and `vex flags statuses` returns the status map for scripting.
 

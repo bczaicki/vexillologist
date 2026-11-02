@@ -184,6 +184,88 @@ func TestCreateFlag(t *testing.T) {
 	}
 }
 
+// LD defaults an omitted "temporary" to true, so a permanent flag only comes
+// out permanent if false is actually sent.
+func TestCreateFlagSendsPermanentAndAvailability(t *testing.T) {
+	var gotBody map[string]any
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		fmt.Fprint(w, `{"key": "new-flag"}`)
+	}))
+
+	_, err := c.CreateFlag(context.Background(), "my-proj", CreateFlagParams{
+		Key: "new-flag", Name: "New Flag", Temporary: false,
+		ClientSideAvailability: &ClientSideAvailability{UsingEnvironmentID: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if temporary, ok := gotBody["temporary"]; !ok || temporary != false {
+		t.Errorf("temporary = %v (present: %v), want explicit false", temporary, ok)
+	}
+	avail, _ := gotBody["clientSideAvailability"].(map[string]any)
+	if avail["usingEnvironmentId"] != true || avail["usingMobileKey"] != false {
+		t.Errorf("clientSideAvailability = %v", gotBody["clientSideAvailability"])
+	}
+}
+
+func TestUpdateFlagSettingsPatch(t *testing.T) {
+	var gotMethod, gotContentType, gotBody string
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		fmt.Fprint(w, `{"key": "my-flag", "temporary": false,
+			"clientSideAvailability": {"usingEnvironmentId": false, "usingMobileKey": true}}`)
+	}))
+
+	off, on := false, true
+	flag, err := c.UpdateFlagSettings(context.Background(), "my-proj", "my-flag",
+		FlagSettingsUpdate{ClientSide: &off, Permanent: &on}, "via vex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPatch || gotContentType != "application/json; domain-model=launchdarkly.semanticpatch" {
+		t.Errorf("request = %s (%s)", gotMethod, gotContentType)
+	}
+	// Flag-wide, and only the settings that were set: mobile is untouched.
+	want := `{"comment":"via vex","instructions":[` +
+		`{"kind":"turnOffClientSideAvailability","value":"usingEnvironmentId"},` +
+		`{"kind":"makeFlagPermanent"}]}`
+	if gotBody != want {
+		t.Errorf("body = %s\nwant %s", gotBody, want)
+	}
+	if got := flag.SettingsSummary(); got != "client-side SDKs off · mobile SDKs on · permanent" {
+		t.Errorf("SettingsSummary = %q", got)
+	}
+}
+
+func TestFlagSettingsUpdateHelpers(t *testing.T) {
+	off, on := false, true
+	cases := []struct {
+		update      FlagSettingsUpdate
+		disablesSDK bool
+		describe    string
+	}{
+		{FlagSettingsUpdate{}, false, ""},
+		{FlagSettingsUpdate{ClientSide: &on, Permanent: &off}, false, "client-side SDKs on, temporary"},
+		{FlagSettingsUpdate{Mobile: &off}, true, "mobile SDKs off"},
+		{FlagSettingsUpdate{ClientSide: &off, Mobile: &on}, true, "client-side SDKs off, mobile SDKs on"},
+	}
+	for _, tc := range cases {
+		if got := tc.update.DisablesSDK(); got != tc.disablesSDK {
+			t.Errorf("%q: DisablesSDK = %v", tc.describe, got)
+		}
+		if got := tc.update.Describe(); got != tc.describe {
+			t.Errorf("Describe = %q, want %q", got, tc.describe)
+		}
+	}
+	if !(FlagSettingsUpdate{}).Empty() || (FlagSettingsUpdate{Mobile: &off}).Empty() {
+		t.Error("Empty misreports")
+	}
+}
+
 func TestRateLimitRetriesOnce(t *testing.T) {
 	attempts := 0
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

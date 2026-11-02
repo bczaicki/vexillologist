@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bczaicki/vexillologist/internal/ld"
 )
 
 // runVex executes the command tree with args and returns stdout and the error.
@@ -346,6 +349,115 @@ func TestCreateFlagJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result["ok"] != true || result["action"] != "createFlag" {
+		t.Errorf("result = %v", result)
+	}
+}
+
+// createBody runs `flags create` with extra args and returns the JSON body
+// LaunchDarkly received.
+func createBody(t *testing.T, extra ...string) map[string]any {
+	t.Helper()
+	var body map[string]any
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		fmt.Fprint(w, `{"key": "new-flag", "name": "new-flag"}`)
+	})
+	args := append([]string{"flags", "create", "new-flag", "-p", "horizon", "--api-token", "tok", "--base-url", srv.URL}, extra...)
+	if _, err := runVex(t, args...); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestCreateFlagDefaultsToClientSideTemporary(t *testing.T) {
+	body := createBody(t)
+	avail, _ := body["clientSideAvailability"].(map[string]any)
+	if avail["usingEnvironmentId"] != true || avail["usingMobileKey"] != false {
+		t.Errorf("clientSideAvailability = %v, want client-side on, mobile off", body["clientSideAvailability"])
+	}
+	if body["temporary"] != true {
+		t.Errorf("temporary = %v, want true", body["temporary"])
+	}
+}
+
+func TestCreateFlagSettingsFlags(t *testing.T) {
+	body := createBody(t, "--client-side=false", "--mobile", "--permanent")
+	avail, _ := body["clientSideAvailability"].(map[string]any)
+	if avail["usingEnvironmentId"] != false || avail["usingMobileKey"] != true {
+		t.Errorf("clientSideAvailability = %v", body["clientSideAvailability"])
+	}
+	if body["temporary"] != false {
+		t.Errorf("temporary = %v, want explicit false", body["temporary"])
+	}
+}
+
+func TestCreateFlagTemporaryAndPermanentConflict(t *testing.T) {
+	_, err := runVex(t, "flags", "create", "new-flag", "--temporary", "--permanent",
+		"-p", "horizon", "--api-token", "tok")
+	if err == nil || exitCodeFor(err) != ExitUsage {
+		t.Errorf("err = %v, want usage error", err)
+	}
+}
+
+func TestFlagSettingsDryRunSendsOnlyPassedSettings(t *testing.T) {
+	out, err := runVex(t, "flags", "settings", "my-flag", "--mobile", "--permanent=false",
+		"--dry-run", "--json", "-p", "horizon", "--api-token", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Action string           `json:"action"`
+		Patch  ld.SemanticPatch `json:"patch"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+	want := []ld.Instruction{
+		{Kind: "turnOnClientSideAvailability", Value: "usingMobileKey"},
+		{Kind: "makeFlagTemporary"},
+	}
+	if result.Action != "updateFlagSettings" || !reflect.DeepEqual(result.Patch.Instructions, want) {
+		t.Errorf("result = %+v", result)
+	}
+}
+
+func TestFlagSettingsRequiresASetting(t *testing.T) {
+	_, err := runVex(t, "flags", "settings", "my-flag", "-p", "horizon", "--api-token", "tok")
+	if err == nil || exitCodeFor(err) != ExitUsage {
+		t.Errorf("err = %v, want usage error", err)
+	}
+}
+
+func TestFlagSettingsHeadlessRequiresYes(t *testing.T) {
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	})
+
+	_, err := runVex(t, "flags", "settings", "my-flag", "--client-side=false",
+		"-p", "horizon", "--api-token", "tok", "--base-url", srv.URL)
+	if err == nil || exitCodeFor(err) != ExitConfirmation {
+		t.Errorf("err = %v, want confirmation error", err)
+	}
+}
+
+func TestFlagSettingsJSON(t *testing.T) {
+	srv := newLDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v2/flags/horizon/my-flag" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"key": "my-flag", "temporary": false}`)
+	})
+
+	out, err := runVex(t, "flags", "settings", "my-flag", "--permanent", "--yes", "--json",
+		"-p", "horizon", "--api-token", "tok", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["ok"] != true || result["action"] != "updateFlagSettings" {
 		t.Errorf("result = %v", result)
 	}
 }

@@ -33,6 +33,9 @@ type flagCreatedMsg *ld.FeatureFlag
 type flagArchivedMsg struct{ key string }
 type flagRestoredMsg struct{ key string }
 
+// flagSettingsUpdatedMsg is LD's response to a settings update.
+type flagSettingsUpdatedMsg *ld.FeatureFlag
+
 // statusesLoadedMsg carries flag statuses for one environment; a nil map means
 // they were unavailable (statuses are an enhancement, not worth an error
 // banner). env identifies which column asked, since the cursor may have moved
@@ -159,6 +162,18 @@ func restoreFlag(client ld.API, project, key string) tea.Cmd {
 			return errMsg{err}
 		}
 		return flagRestoredMsg{key: key}
+	}
+}
+
+func updateFlagSettings(client ld.API, project, key string, update ld.FlagSettingsUpdate) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := withTimeout()
+		defer cancel()
+		flag, err := client.UpdateFlagSettings(ctx, project, key, update, "via vex tui")
+		if err != nil {
+			return errMsg{err}
+		}
+		return flagSettingsUpdatedMsg(flag)
 	}
 }
 

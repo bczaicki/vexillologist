@@ -112,6 +112,17 @@ func (c *Client) RestoreFlag(ctx context.Context, projectKey, flagKey, comment s
 	return flag, nil
 }
 
+// UpdateFlagSettings changes a flag's flag-wide settings (SDK availability,
+// temporary/permanent) via semantic patch.
+func (c *Client) UpdateFlagSettings(ctx context.Context, projectKey, flagKey string, u FlagSettingsUpdate, comment string) (*FeatureFlag, error) {
+	patch := FlagSettingsPatch(u, comment)
+	flag, err := c.semanticPatchFlag(ctx, projectKey, flagKey, patch)
+	if err != nil {
+		return nil, fmt.Errorf("updating settings of flag %q: %w", flagKey, err)
+	}
+	return flag, nil
+}
+
 func (c *Client) semanticPatchFlag(ctx context.Context, projectKey, flagKey string, patch SemanticPatch) (*FeatureFlag, error) {
 	path := fmt.Sprintf("/api/v2/flags/%s/%s", url.PathEscape(projectKey), url.PathEscape(flagKey))
 	var flag FeatureFlag

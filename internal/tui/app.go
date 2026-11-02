@@ -32,11 +32,12 @@ type Model struct {
 	envs    []ld.Environment
 	guarded []string
 
-	screen  screen
-	picker  picker
-	flags   flagList
-	form    createForm
-	confirm *confirmModal
+	screen   screen
+	picker   picker
+	flags    flagList
+	form     createForm
+	confirm  *confirmModal
+	settings *settingsModal
 	// showArchived flips the flag list to LaunchDarkly's archived flags
 	// (the API returns active or archived, never both).
 	showArchived bool
@@ -213,6 +214,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("✓ restored %s", msg.key)
 		return m, nil
 
+	case flagSettingsUpdatedMsg:
+		m.loading = false
+		updated := (*ld.FeatureFlag)(msg)
+		m.markSettings(updated)
+		m.status = fmt.Sprintf("✓ %s: %s", updated.Key, updated.SettingsSummary())
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -235,6 +243,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, cmd
+	}
+
+	// So does the settings modal; applying a change hands off to a confirm.
+	if m.settings != nil {
+		done, update := m.settings.update(msg)
+		if done {
+			flagKey := m.settings.flagKey
+			m.settings = nil
+			if update != nil {
+				m.confirm = m.settingsConfirm(flagKey, *update)
+			}
+		}
+		return m, nil
 	}
 
 	// While a list filter prompt is open, keys belong to the list.
@@ -318,6 +339,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Toggle):
 			return m.startToggle()
+
+		case key.Matches(msg, keys.Settings):
+			return m.startSettings()
 
 		case key.Matches(msg, keys.Archive):
 			return m.startArchive()
@@ -454,6 +478,45 @@ func (m Model) startToggle() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// startSettings opens the settings modal for the selected flag.
+func (m Model) startSettings() (tea.Model, tea.Cmd) {
+	flag := m.flags.selected()
+	if flag == nil {
+		return m, nil
+	}
+	if flag.Archived {
+		m.err = errors.New(flag.Key + " is archived; restore it to change its settings")
+		return m, nil
+	}
+	m.settings = newSettingsModal(flag)
+	return m, nil
+}
+
+// settingsConfirm gates a settings update. Settings are flag-wide, and taking
+// a flag away from an SDK breaks every app evaluating it, so that demands the
+// typed flag key, as archiving does.
+func (m *Model) settingsConfirm(flagKey string, update ld.FlagSettingsUpdate) *confirmModal {
+	prompt := fmt.Sprintf("Set %s on %s? This affects ALL environments.", update.Describe(), flagKey)
+	expected := ""
+	if update.DisablesSDK() {
+		expected = flagKey
+	}
+	return newConfirmModal(prompt, expected, updateFlagSettings(m.client, m.project, flagKey, update))
+}
+
+// markSettings copies a settings update's result onto the flag's row and the
+// detail view. Settings are flag-wide, so nothing else needs re-fetching.
+func (m *Model) markSettings(updated *ld.FeatureFlag) {
+	for i := range m.rawFlags {
+		if m.rawFlags[i].Key == updated.Key {
+			m.rawFlags[i] = withSettingsOf(m.rawFlags[i], updated)
+			break
+		}
+	}
+	m.flags.markSettings(updated)
+	m.resort()
+}
+
 // startRestore opens a confirm modal to restore the selected archived flag.
 func (m Model) startRestore() (tea.Model, tea.Cmd) {
 	flag := m.flags.selected()
@@ -562,6 +625,9 @@ func (m Model) View() string {
 		content = m.form.view()
 	}
 
+	if m.settings != nil {
+		content = overlayCenter(m.width, max(1, m.height-1), m.settings.view())
+	}
 	if m.confirm != nil {
 		content = overlayCenter(m.width, max(1, m.height-1), m.confirm.view())
 	}

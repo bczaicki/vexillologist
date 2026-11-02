@@ -15,21 +15,24 @@ const (
 	fieldKey
 	fieldDescription
 	fieldTags
-	fieldCount
+	// textFieldCount is the number of text inputs; the setting rows follow.
+	textFieldCount
+	fieldCount = textFieldCount + settingCount
 )
 
 // createForm is the new-flag screen: name, key (auto-slugified from name
-// until edited), description, tags.
+// until edited), description, tags, then the flag-wide settings.
 type createForm struct {
-	inputs    [fieldCount]textinput.Model
+	inputs    [textFieldCount]textinput.Model
+	settings  settingValues
 	focus     int
 	keyEdited bool
 	errText   string
 }
 
 func newCreateForm() createForm {
-	f := createForm{}
-	labels := [fieldCount]string{"Name", "Key", "Description", "Tags (comma-separated)"}
+	f := createForm{settings: defaultSettings}
+	labels := [textFieldCount]string{"Name", "Key", "Description", "Tags (comma-separated)"}
 	for i := range f.inputs {
 		ti := textinput.New()
 		ti.Placeholder = labels[i]
@@ -73,9 +76,19 @@ func (f *createForm) update(msg tea.Msg) (*ld.CreateFlagParams, bool, tea.Cmd) {
 				return nil, false, nil
 			}
 			return params, true, nil
+		case " ":
+			if f.focus >= textFieldCount {
+				i := f.focus - textFieldCount
+				f.settings[i] = !f.settings[i]
+				return nil, false, nil
+			}
 		}
 	}
 
+	// Setting rows have no input to forward to.
+	if f.focus >= textFieldCount {
+		return nil, false, nil
+	}
 	var cmd tea.Cmd
 	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(msg)
 
@@ -107,24 +120,30 @@ func (f *createForm) buildParams() (*ld.CreateFlagParams, bool) {
 		}
 	}
 	return &ld.CreateFlagParams{
-		Key:         key,
-		Name:        name,
-		Description: strings.TrimSpace(f.inputs[fieldDescription].Value()),
-		Tags:        tags,
+		Key:                    key,
+		Name:                   name,
+		Description:            strings.TrimSpace(f.inputs[fieldDescription].Value()),
+		Tags:                   tags,
+		Temporary:              !f.settings[settingPermanent],
+		ClientSideAvailability: f.settings.availability(),
 	}, true
 }
 
 func (f *createForm) setFocus(i int) {
-	f.inputs[f.focus].Blur()
+	if f.focus < textFieldCount {
+		f.inputs[f.focus].Blur()
+	}
 	f.focus = i
-	f.inputs[i].Focus()
+	if i < textFieldCount {
+		f.inputs[i].Focus()
+	}
 	f.errText = ""
 }
 
 func (f *createForm) view() string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("create flag") + "\n\n")
-	labels := [fieldCount]string{"name", "key", "description", "tags"}
+	labels := [textFieldCount]string{"name", "key", "description", "tags"}
 	for i, input := range f.inputs {
 		cursor := "  "
 		if i == f.focus {
@@ -132,9 +151,14 @@ func (f *createForm) view() string {
 		}
 		b.WriteString(cursor + styleDim.Render(labels[i]) + "\n" + cursor + input.View() + "\n\n")
 	}
+	b.WriteString("  " + styleDim.Render("advanced controls") + "\n")
+	for i, on := range f.settings {
+		b.WriteString(settingRow(i, on, f.focus == textFieldCount+i) + "\n")
+	}
+	b.WriteString("\n")
 	if f.errText != "" {
 		b.WriteString(styleError.Render(f.errText) + "\n")
 	}
-	b.WriteString(styleHelpLine.Render("tab/enter next · shift+tab back · enter on tags submits · esc cancels"))
+	b.WriteString(styleHelpLine.Render("tab/enter next · shift+tab back · space toggles · enter on the last row submits · esc cancels"))
 	return b.String()
 }
